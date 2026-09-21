@@ -162,7 +162,7 @@ function Get-SystemInfo {
     resolution=$resolution
     mouse_devices=$mouse
     keyboard_devices=$keyboard
-    agent_version='4.2-powershell'
+    agent_version='4.2.1-ram64'
   }
 }
 
@@ -172,7 +172,9 @@ function Get-Metrics {
   if ($null -eq $cpuLoad) { $cpuLoad = 0 }
   $totalMem = [double]$os.TotalVisibleMemorySize * 1KB
   $freeMem = [double]$os.FreePhysicalMemory * 1KB
-  $usedMem = [Math]::Max(0,$totalMem-$freeMem)
+  # Avoid PowerShell selecting the Int32 Math.Max overload for byte values > 2 GB.
+  $usedMem = [double]($totalMem - $freeMem)
+  if ($usedMem -lt 0.0) { $usedMem = 0.0 }
   $disks = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3')
   $vols = @()
   $totalDisk=0.0; $freeDisk=0.0
@@ -182,8 +184,11 @@ function Get-Metrics {
     $totalDisk += [double]$d.Size; $freeDisk += [double]$d.FreeSpace
     $vols += @{ mount=[string]$d.DeviceID; filesystem=[string]$d.FileSystem; percent=[Math]::Round(($used/[double]$d.Size)*100,1); used_gb=[Math]::Round($used/1GB,2); total_gb=[Math]::Round(([double]$d.Size)/1GB,2) }
   }
-  $usedDisk=$totalDisk-$freeDisk
+  $usedDisk=[double]($totalDisk-$freeDisk)
+  if ($usedDisk -lt 0.0) { $usedDisk = 0.0 }
   $boot=[datetime]$os.LastBootUpTime
+  $uptimeSeconds = [int64]((Get-Date)-$boot).TotalSeconds
+  if ($uptimeSeconds -lt 0) { $uptimeSeconds = [int64]0 }
   return @{
     cpu_percent=[Math]::Round([double]$cpuLoad,1)
     memory_percent= if ($totalMem) {[Math]::Round(($usedMem/$totalMem)*100,1)} else {0}
@@ -193,7 +198,7 @@ function Get-Metrics {
     storage_used_gb=[Math]::Round($usedDisk/1GB,2)
     storage_total_gb=[Math]::Round($totalDisk/1GB,2)
     storage_volumes=$vols
-    uptime_seconds=[Math]::Max(0,[int]((Get-Date)-$boot).TotalSeconds)
+    uptime_seconds=$uptimeSeconds
   }
 }
 

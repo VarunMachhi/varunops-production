@@ -13,7 +13,7 @@ $log=Join-Path $dir 'agent.log'
 if(-not (Test-Path $config)){throw 'No existing VarunOps device registration was found. Use CONNECT_THIS_PC.bat instead.'}
 
 Write-Host ''
-Write-Host 'VarunOps Agent 4.2 - Repair / Upgrade' -ForegroundColor Cyan
+Write-Host 'VarunOps Agent 4.2.1 - RAM64 Repair / Upgrade' -ForegroundColor Cyan
 Write-Host '------------------------------------' -ForegroundColor Cyan
 
 try {
@@ -23,7 +23,7 @@ if(-not $cfg.server_url){throw 'Existing registration has no server_url. Re-pair
 if(-not $cfg.agent_id -or -not $cfg.agent_key){throw 'Existing registration has no per-device agent key. Re-pair this PC from the employee portal.'}
 
 # Keep a recovery copy of the currently registered credentials/config.
-Copy-Item $config (Join-Path $dir 'agent.json.before-4.2.bak') -Force
+Copy-Item $config (Join-Path $dir 'agent.json.before-4.2.1.bak') -Force
 
 # Stop/remove legacy scheduled task. Older VarunOps builds may still point at VarunOpsAgent.exe.
 Stop-ScheduledTask -TaskName 'VarunOps Agent' -ErrorAction SilentlyContinue
