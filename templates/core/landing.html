@@ -1,0 +1,160 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f5f5f7">
+  <title>VarunOps Pro — IT Operations, beautifully simple.</title>
+  <meta name="description" content="VarunOps Pro centralizes endpoint software, branch devices, policies, activity and agent-driven IT operations.">
+  <link rel="stylesheet" href="{% static 'core/css/style.css' %}">
+</head>
+<body class="marketing-body">
+  <div class="ambient ambient-one" aria-hidden="true"></div>
+  <div class="ambient ambient-two" aria-hidden="true"></div>
+  <header class="site-nav liquid-nav" id="siteNav">
+    <a class="brand" href="#top" aria-label="VarunOps home">
+      <span class="brand-symbol"><i></i><i></i><i></i></span>
+      <span>VarunOps</span><small>Pro</small>
+    </a>
+    <nav class="nav-links" aria-label="Primary navigation">
+      <a href="#features">Features</a>
+      <a href="#workflow">Workflow</a>
+      <a href="#security">Security</a>
+      <a href="#architecture">Architecture</a>
+    </nav>
+    <div class="nav-actions">
+      {% if request.user.is_authenticated %}
+        <a class="nav-text-link" href="{% url 'workspace' %}">My workspace</a>
+      {% else %}
+        <a class="nav-text-link" href="{% url 'login' %}">Sign in</a>
+      {% endif %}
+      <a class="apple-button compact" href="{% url 'workspace' %}">Open Workspace</a>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero section-shell">
+      <div class="hero-badge reveal"><span class="live-dot"></span> Endpoint operations for real IT work</div>
+      <h1 class="hero-title reveal delay-1">IT management.<br><span>Clear at a glance.</span></h1>
+      <p class="hero-copy reveal delay-2">Manage Windows devices, software updates, employee requests, support tickets and branch inventory from one calm system. IT gets the control console; employees get a private self-service workspace.</p>
+      <div class="hero-actions reveal delay-3">
+        <a class="apple-button" href="{% url 'workspace' %}">Open VarunOps</a>
+        <a class="text-button" href="#features">Explore features <span>›</span></a>
+      </div>
+
+      <div class="device-stage reveal delay-4" id="deviceStage">
+        <div class="stage-glow" aria-hidden="true"></div>
+        <div class="browser-card liquid-card" id="heroCard">
+          <div class="browser-toolbar">
+            <div class="traffic"><i></i><i></i><i></i></div>
+            <div class="browser-title">VarunOps Pro · Overview</div>
+            <div class="browser-status"><span></span> Protected</div>
+          </div>
+          <div class="preview-sidebar">
+            <div class="preview-logo"><span class="brand-symbol mini"><i></i><i></i><i></i></span></div>
+            <i class="preview-nav active"></i><i class="preview-nav"></i><i class="preview-nav"></i><i class="preview-nav"></i><i class="preview-nav"></i>
+          </div>
+          <div class="preview-main">
+            <div class="preview-heading"><div><b>Good afternoon, Varun.</b><small>Everything that needs attention, in one place.</small></div><button>Update all</button></div>
+            <div class="preview-kpis">
+              <article><span>Devices</span><strong>28</strong><small>24 online</small></article>
+              <article><span>Software health</span><strong>94%</strong><small>17 updates due</small></article>
+              <article><span>Branches</span><strong>5</strong><small>All reporting</small></article>
+              <article><span>Commands</span><strong>3</strong><small>Queued</small></article>
+            </div>
+            <div class="preview-table">
+              <div class="preview-row head"><span>Machine</span><span>Chrome</span><span>7-Zip</span><span>AnyDesk</span><span>Status</span></div>
+              <div class="preview-row"><span><b>VDN-HO-01</b><small>Vadodara HO</small></span><span class="ok">140</span><span class="ok">25.01</span><span class="update">9.4 ↑</span><span class="online">Online</span></div>
+              <div class="preview-row"><span><b>PANJIM-PC-02</b><small>Panjim</small></span><span class="update">139 ↑</span><span class="ok">25.01</span><span class="ok">9.5</span><span class="online">Online</span></div>
+              <div class="preview-row"><span><b>RAJKOT-LT-01</b><small>Rajkot</small></span><span class="ok">140</span><span class="update">24.09 ↑</span><span class="ok">9.5</span><span class="offline">Offline</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="intro-strip reveal">
+      <p>One small agent. Two role-aware workspaces. <strong>No generic remote shell.</strong></p>
+    </section>
+
+    <section class="feature-section section-shell" id="features">
+      <div class="section-intro reveal"><span>Designed for speed</span><h2>The everyday tools.<br>Without everyday clutter.</h2><p>VarunOps keeps software, machines, policy and activity close together so routine support stays understandable.</p></div>
+      <div class="bento-grid">
+        <article class="bento bento-large reveal">
+          <div class="bento-copy"><span class="eyebrow">Apps × Machines</span><h3>See the whole software estate in one grid.</h3><p>Select one app, an entire device, or many endpoints. Queue approved installs, updates and removals without opening each machine separately.</p></div>
+          <div class="mini-app-grid">
+            <div class="mag-head">Machine</div><div class="mag-head">Chrome</div><div class="mag-head">7-Zip</div><div class="mag-head">VLC</div>
+            <b>VDN-HO-01</b><i class="chip good">Current</i><i class="chip good">Current</i><i class="chip warn">Update</i>
+            <b>PANJIM-PC-02</b><i class="chip warn">Update</i><i class="chip good">Current</i><i class="chip good">Current</i>
+            <b>RAJKOT-LT-01</b><i class="chip good">Current</i><i class="chip warn">Update</i><i class="chip neutral">Missing</i>
+          </div>
+        </article>
+        <article class="bento reveal">
+          <div class="orb-visual policy-orb"><span>Automatic</span><i></i><i></i><i></i></div>
+          <div class="bento-copy bottom"><span class="eyebrow">Policies</span><h3>Manual when you want it. Automatic when you don’t.</h3></div>
+        </article>
+        <article class="bento reveal">
+          <div class="branch-stack"><span>Vadodara HO<i>12</i></span><span>Panjim<i>5</i></span><span>Rajkot<i>4</i></span><span>Borivali<i>3</i></span><span>Bandra<i>4</i></span></div>
+          <div class="bento-copy bottom"><span class="eyebrow">Branches & tags</span><h3>Group devices the way your business actually works.</h3></div>
+        </article>
+        <article class="bento bento-wide reveal">
+          <div class="activity-demo">
+            <div><i class="event-dot success"></i><span><b>Google Chrome updated</b><small>VDN-HO-01 · completed</small></span><time>Now</time></div>
+            <div><i class="event-dot queued"></i><span><b>7-Zip queued</b><small>RAJKOT-LT-01 · waiting for device</small></span><time>2m</time></div>
+            <div><i class="event-dot warning"></i><span><b>Locked policy protected device</b><small>BORIVALI-SERVER-01</small></span><time>8m</time></div>
+          </div>
+          <div class="bento-copy"><span class="eyebrow">Command history</span><h3>Every action has a state. Every important event has an audit trail.</h3></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="workflow-section" id="workflow">
+      <div class="section-shell workflow-shell">
+        <div class="sticky-copy reveal"><span>How it works</span><h2>Install once.<br>Manage from anywhere.</h2><p>The agent checks in over HTTPS, reports inventory, receives only allow-listed app commands, and posts the result back to the server.</p></div>
+        <div class="flow-cards">
+          <article class="flow-card reveal"><div class="flow-number">01</div><h3>Enroll</h3><p>Use a temporary enrollment token. The server returns a unique per-device credential, which is stored only as a hash server-side.</p><div class="flow-visual enroll"><span>Windows PC</span><i></i><span>VarunOps</span></div></article>
+          <article class="flow-card reveal"><div class="flow-number">02</div><h3>Report</h3><p>The agent sends heartbeat, hardware context and the versions of apps from your approved catalog.</p><div class="heartbeat"><i></i><i></i><i></i><i></i><i></i></div></article>
+          <article class="flow-card reveal"><div class="flow-number">03</div><h3>Queue</h3><p>Your browser writes commands to the server. Offline systems keep work queued until their next authenticated check-in.</p><div class="queue-visual"><span>Install</span><span>Update</span><span>Remove</span></div></article>
+          <article class="flow-card reveal"><div class="flow-number">04</div><h3>Verify</h3><p>Results update the inventory and activity timeline, so you can distinguish queued, running, successful and failed work.</p><div class="verify-ring"><span>✓</span></div></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="security-section section-shell" id="security">
+      <div class="security-panel reveal">
+        <div class="security-copy"><span>Security built into the shape of the product</span><h2>Powerful enough for IT.<br>Restricted enough to stay sane.</h2><p>VarunOps does not expose an arbitrary command endpoint. Agent operations are constrained to server-approved applications and three explicit software actions.</p><a class="text-button" href="#architecture">See the architecture <span>›</span></a></div>
+        <div class="security-list">
+          <div><span>01</span><p><b>Staff-only console</b><small>Django sessions, CSRF protection and staff authorization guard browser actions.</small></p></div>
+          <div><span>02</span><p><b>Per-device keys</b><small>Each enrolled endpoint receives its own long random secret; the server keeps only a password hash.</small></p></div>
+          <div><span>03</span><p><b>Allow-listed commands</b><small>No arbitrary PowerShell/CMD payloads are accepted through the device command API.</small></p></div>
+          <div><span>04</span><p><b>Production hardening</b><small>HTTPS redirect, secure cookies, HSTS options, CSP, clickjacking protection and rate limits are included.</small></p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="architecture-section section-shell" id="architecture">
+      <div class="section-intro reveal"><span>Architecture</span><h2>Cloud control.<br>Small endpoint footprint.</h2></div>
+      <div class="architecture-card liquid-card reveal">
+        <div class="arch-node client"><i></i><b>Admin browser</b><small>Session + CSRF</small></div>
+        <div class="arch-line"><span>HTTPS</span></div>
+        <div class="arch-node cloud"><i></i><b>VarunOps API</b><small>Django + audit</small></div>
+        <div class="arch-line split-line"><span>HTTPS</span></div>
+        <div class="agent-nodes"><div class="arch-node endpoint"><i></i><b>Vadodara</b><small>Agent key</small></div><div class="arch-node endpoint"><i></i><b>Panjim</b><small>Agent key</small></div><div class="arch-node endpoint"><i></i><b>Rajkot</b><small>Agent key</small></div></div>
+        <div class="database-node"><span>PostgreSQL</span><small>Devices · commands · audit</small></div>
+      </div>
+    </section>
+
+    <section class="final-cta section-shell reveal">
+      <div class="final-glow" aria-hidden="true"></div>
+      <span>VarunOps Pro</span><h2>Your IT workspace,<br>made simpler.</h2><p>Start with the included secure demo data, then enroll real Windows endpoints when you are ready.</p><a class="apple-button" href="{% url 'workspace' %}">Open Console</a>
+    </section>
+  </main>
+
+  <footer class="site-footer section-shell">
+    <div class="brand"><span class="brand-symbol mini"><i></i><i></i><i></i></span><span>VarunOps</span><small>Pro</small></div>
+    <p>Independent IT operations project. Not affiliated with Ninite or Apple.</p>
+  </footer>
+  <script src="{% static 'core/js/landing.js' %}" defer></script>
+</body>
+</html>

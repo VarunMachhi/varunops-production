@@ -1,0 +1,6 @@
+VarunOps Pro RealDeploy FIX501
+
+Fixes:
+- verify_workspace management command now aliases the database Command model as AgentCommand, preventing class-name shadowing and the AttributeError: type object 'Command' has no attribute 'objects'.
+- Django model index names are explicitly aligned with packaged migration index names to prevent false pending-model-change warnings on Django 6.
+- Existing FIX500 startup/repair behavior retained.

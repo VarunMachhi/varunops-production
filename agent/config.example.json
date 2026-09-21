@@ -1,0 +1,9 @@
+{
+  "server_url": "https://your-varunops-domain.example",
+  "name": "VDN-HO-01",
+  "branch": "Vadodara HO",
+  "device_type": "Desktop",
+  "enrollment_token": "PASTE_TEMPORARY_ENROLLMENT_TOKEN_HERE",
+  "poll_seconds": 20,
+  "dry_run": true
+}

@@ -1,0 +1,9 @@
+.env
+*.sqlite3
+__pycache__/
+*.py[cod]
+staticfiles/
+.venv/
+agent/agent.json
+
+private_media/
