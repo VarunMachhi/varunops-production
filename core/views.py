@@ -533,13 +533,26 @@ def agent_heartbeat(request):
     data = request.data
     if not isinstance(data, dict):
         return Response({"detail": "JSON object required"}, status=400)
-    machine.ip_address = data.get("ip_address") or machine.ip_address
-    machine.os_version = str(data.get("os_version", machine.os_version))[:180]
-    machine.serial_number = str(data.get("serial_number", machine.serial_number))[:120]
-    info = data.get("system_info", {})
-    if isinstance(info, dict):
-        # hard cap simple JSON inventory to avoid unbounded storage abuse
-        machine.system_info = _bounded_json(info)
+    section_errors = []
+    if "ip_address" in data and data.get("ip_address"):
+        candidate_ip = str(data.get("ip_address", "")).strip()
+        try:
+            from django.core.validators import validate_ipv46_address
+            validate_ipv46_address(candidate_ip)
+            machine.ip_address = candidate_ip
+        except ValidationError:
+            section_errors.append("ip_address")
+    if "os_version" in data:
+        machine.os_version = str(data.get("os_version") or "")[:180]
+    if "serial_number" in data:
+        machine.serial_number = str(data.get("serial_number") or "")[:120]
+    if "system_info" in data:
+        info = data.get("system_info")
+        if isinstance(info, dict):
+            # hard cap simple JSON inventory to avoid unbounded storage abuse
+            machine.system_info = _bounded_json(info)
+        else:
+            section_errors.append("system_info")
     machine.last_seen = timezone.now()
     machine.save(update_fields=["ip_address", "os_version", "serial_number", "system_info", "last_seen"])
 
@@ -745,6 +758,7 @@ def agent_heartbeat(request):
         "metrics_received": metrics_received,
         "machine_ready": machine_ready,
         "agent_version": agent_version,
+        "section_errors": section_errors,
     })
 
 

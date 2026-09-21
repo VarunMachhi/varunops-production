@@ -34,7 +34,7 @@ function Save-Config($cfg) {
 
 function Invoke-AgentApi([string]$Path,[string]$Method='GET',$Body=$null,$ExtraHeaders=@{}) {
   $cfg = Load-Config
-  $headers = @{ 'Accept'='application/json'; 'User-Agent'='VarunOps-AgentPS/4.2' }
+  $headers = @{ 'Accept'='application/json'; 'User-Agent'='VarunOps-AgentPS/4.2.3-safe400' }
   if ($cfg.agent_id -and $cfg.agent_key) {
     $headers['X-Agent-ID'] = [string]$cfg.agent_id
     $headers['X-Agent-Key'] = [string]$cfg.agent_key
@@ -42,10 +42,29 @@ function Invoke-AgentApi([string]$Path,[string]$Method='GET',$Body=$null,$ExtraH
   foreach ($k in $ExtraHeaders.Keys) { $headers[$k] = $ExtraHeaders[$k] }
   $params = @{ Uri = (([string]$cfg.server_url).TrimEnd('/') + $Path); Method=$Method; Headers=$headers; TimeoutSec=60; UseBasicParsing=$true }
   if ($null -ne $Body) {
-    $params['ContentType']='application/json'
+    $params['ContentType']='application/json; charset=utf-8'
     $params['Body']=($Body | ConvertTo-Json -Depth 12 -Compress)
   }
-  return Invoke-RestMethod @params
+  try {
+    return Invoke-RestMethod @params
+  } catch {
+    $status=''; $responseBody=''
+    try {
+      if ($_.Exception.Response) {
+        try { $status=[int]$_.Exception.Response.StatusCode } catch { $status=[string]$_.Exception.Response.StatusCode }
+        $stream=$_.Exception.Response.GetResponseStream()
+        if ($stream) {
+          $reader=New-Object System.IO.StreamReader($stream)
+          $responseBody=$reader.ReadToEnd()
+          $reader.Dispose()
+        }
+      }
+    } catch {}
+    if($responseBody.Length -gt 1200){$responseBody=$responseBody.Substring(0,1200)}
+    $message="HTTP $status from $Path"
+    if($responseBody){$message += ": $responseBody"}
+    throw $message
+  }
 }
 
 function Clean-HardwareValue([string]$Value) {
@@ -162,7 +181,38 @@ function Get-SystemInfo {
     resolution=$resolution
     mouse_devices=$mouse
     keyboard_devices=$keyboard
-    agent_version='4.2.1-ram64'
+    agent_version='4.2.3-safe400'
+  }
+}
+
+function Get-SystemInfoCore($FullInfo=$null) {
+  if ($null -eq $FullInfo) { $FullInfo=Get-SystemInfo }
+  return @{
+    hostname=[string]$FullInfo.hostname
+    manufacturer=[string]$FullInfo.manufacturer
+    model=[string]$FullInfo.model
+    processor=[string]$FullInfo.processor
+    cpu_name=[string]$FullInfo.cpu_name
+    cpu_id=[string]$FullInfo.cpu_id
+    cpu_manufacturer=[string]$FullInfo.cpu_manufacturer
+    cpu_cores=[int]$FullInfo.cpu_cores
+    cpu_logical_processors=[int]$FullInfo.cpu_logical_processors
+    cpu_max_clock_mhz=[int]$FullInfo.cpu_max_clock_mhz
+    memory=[string]$FullInfo.memory
+    memory_total_gb=[double]$FullInfo.memory_total_gb
+    windows_user=[string]$FullInfo.windows_user
+    domain=[string]$FullInfo.domain
+    os_caption=[string]$FullInfo.os_caption
+    os_version=[string]$FullInfo.os_version
+    os_build=[string]$FullInfo.os_build
+    os_architecture=[string]$FullInfo.os_architecture
+    bios_version=[string]$FullInfo.bios_version
+    bios_serial=[string]$FullInfo.bios_serial
+    motherboard_manufacturer=[string]$FullInfo.motherboard_manufacturer
+    motherboard_model=[string]$FullInfo.motherboard_model
+    motherboard_serial=[string]$FullInfo.motherboard_serial
+    resolution=[string]$FullInfo.resolution
+    agent_version='4.2.3-safe400'
   }
 }
 
@@ -372,14 +422,37 @@ function Agent-Cycle {
   $cfg=Load-Config
   $manifest=Invoke-AgentApi '/api/agent/manifest/' 'GET'
   Apply-NetworkPolicy $manifest.network_policy
-  $heartbeat=@{
-    ip_address=(Get-LocalIp)
-    os_version=[string](Get-CimInstance Win32_OperatingSystem).Caption
-    serial_number=(Get-SerialNumber)
-    system_info=(Get-SystemInfo)
-    metrics=(Get-Metrics)
-    boot_time=(Get-BootIso)
-    power_events=(Get-PowerEvents)
+
+  # Phase 1: send only conservative JSON-safe core hardware + telemetry.
+  # This makes onboarding resilient even if an optional WMI/peripheral field is malformed.
+  $fullInfo=Get-SystemInfo
+  $coreInfo=Get-SystemInfoCore $fullInfo
+  $metrics=Get-Metrics
+  $coreHeartbeat=@{
+    system_info=$coreInfo
+    metrics=$metrics
+  }
+  $ack=Invoke-AgentApi '/api/agent/heartbeat/' 'POST' $coreHeartbeat
+  if(-not $ack -or -not [bool]$ack.ok) { throw 'Core heartbeat was not acknowledged by VarunOps server.' }
+  if(-not [bool]$ack.system_info_received) { throw 'Server did not accept core hardware information.' }
+  if(-not [bool]$ack.metrics_received) { throw 'Server did not accept device telemetry.' }
+  Write-AgentLog 'Core hardware + telemetry heartbeat accepted.'
+
+  # Phase 2: enrich the same machine with complete hardware details.
+  # Failure here is non-fatal: core telemetry remains usable and the exact server body is logged.
+  try {
+    $extendedHeartbeat=@{
+      ip_address=(Get-LocalIp)
+      os_version=[string](Get-CimInstance Win32_OperatingSystem).Caption
+      serial_number=(Get-SerialNumber)
+      system_info=$fullInfo
+      metrics=$metrics
+      boot_time=(Get-BootIso)
+    }
+    $extendedAck=Invoke-AgentApi '/api/agent/heartbeat/' 'POST' $extendedHeartbeat
+    if($extendedAck -and [bool]$extendedAck.ok) { Write-AgentLog 'Extended hardware heartbeat accepted.' }
+  } catch {
+    Write-AgentLog ('Extended hardware warning: '+$_.Exception.Message)
   }
 
   $inventoryDue=$true
@@ -390,22 +463,34 @@ function Agent-Cycle {
     }
   } catch { $inventoryDue=$true }
 
+  # Phase 3: software and power event inventory are optional enrichment.
+  # Always include the full system_info so older servers do not clear it when handling a partial heartbeat.
   if($inventoryDue) {
-    $inventory=Get-SoftwareInventory
-    $heartbeat['apps']=(Find-CatalogApps $manifest $inventory)
-    $heartbeat['software_inventory']=$inventory
+    try {
+      $inventory=Get-SoftwareInventory
+      $inventoryHeartbeat=@{
+        ip_address=(Get-LocalIp)
+        os_version=[string](Get-CimInstance Win32_OperatingSystem).Caption
+        serial_number=(Get-SerialNumber)
+        system_info=$fullInfo
+        metrics=$metrics
+        apps=(Find-CatalogApps $manifest $inventory)
+        software_inventory=$inventory
+        power_events=(Get-PowerEvents)
+        boot_time=(Get-BootIso)
+      }
+      $inventoryAck=Invoke-AgentApi '/api/agent/heartbeat/' 'POST' $inventoryHeartbeat
+      if($inventoryAck -and [bool]$inventoryAck.ok) {
+        $cfg=Load-Config
+        $cfg | Add-Member -NotePropertyName last_inventory_utc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
+        Save-Config $cfg
+        Write-AgentLog 'Software + power inventory heartbeat accepted.'
+      }
+    } catch {
+      Write-AgentLog ('Inventory enrichment warning: '+$_.Exception.Message)
+    }
   }
 
-  $ack=Invoke-AgentApi '/api/agent/heartbeat/' 'POST' $heartbeat
-  if(-not $ack -or -not [bool]$ack.ok) { throw 'Heartbeat was not acknowledged by VarunOps server.' }
-  if($inventoryDue -and -not [bool]$ack.system_info_received) { throw 'Server did not accept the full hardware inventory.' }
-  if(-not [bool]$ack.metrics_received) { throw 'Server did not accept device telemetry.' }
-  Write-AgentLog ("Heartbeat accepted. ready="+[string]$ack.machine_ready+" metrics="+[string]$ack.metrics_received+" inventory="+[string]$ack.system_info_received)
-  if($inventoryDue) {
-    $cfg=Load-Config
-    $cfg | Add-Member -NotePropertyName last_inventory_utc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
-    Save-Config $cfg
-  }
   $dryRun = -not [bool]$manifest.live_actions
   Process-Commands $manifest $dryRun
   Process-AgentTasks $dryRun
