@@ -123,3 +123,7 @@ Current enforcement uses managed policy keys for Microsoft Edge and Google Chrom
 - Free-plan terms and limits can change in the future.
 
 For a clinic/company production rollout where downtime matters, move the web service/database to paid tiers after testing.
+
+
+### Render generated secrets
+`render.yaml` uses `generateValue: true` for `SECRET_KEY` and `AGENT_ENROLLMENT_TOKEN`. Render generates a random Base64-encoded 256-bit value (typically 44 characters), which this build accepts as a strong production secret. Do not replace it with a short human password.

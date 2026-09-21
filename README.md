@@ -140,3 +140,7 @@ Free hosting is not guaranteed forever and Render Free is not an always-on produ
 - scans for dangerous shortcuts such as `csrf_exempt`, `eval`, `exec`, `os.system`, and executable `shell=True`
 
 A full Django runtime integration test could not be executed in the build container because its network cannot download PyPI dependencies. The Windows launcher installs those dependencies on the target PC before migrations/startup.
+
+
+### Render generated secrets
+`render.yaml` uses `generateValue: true` for `SECRET_KEY` and `AGENT_ENROLLMENT_TOKEN`. Render generates a random Base64-encoded 256-bit value (typically 44 characters), which this build accepts as a strong production secret. Do not replace it with a short human password.

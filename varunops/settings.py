@@ -12,8 +12,8 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 DEBUG = env_bool("DEBUG", True)
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-dev-only-varunops-change-me")
-if not DEBUG and (SECRET_KEY.startswith("django-insecure-") or len(SECRET_KEY) < 50):
-    raise RuntimeError("Production SECRET_KEY must be a long random value (50+ chars).")
+if not DEBUG and (SECRET_KEY.startswith("django-insecure-") or len(SECRET_KEY) < 40):
+    raise RuntimeError("Production SECRET_KEY must be a strong random value (40+ chars).")
 
 ALLOWED_HOSTS = [x.strip() for x in os.getenv("ALLOWED_HOSTS", "127.0.0.1,localhost").split(",") if x.strip()]
 CSRF_TRUSTED_ORIGINS = [x.strip() for x in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if x.strip()]
