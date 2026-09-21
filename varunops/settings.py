@@ -130,7 +130,7 @@ if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 
-# Transactional email / OTP. For production, configure Resend (or any SMTP provider) with env vars.
+# Optional email settings. Employee password onboarding now uses Admin-delivered OTP and does not require a mail provider.
 EMAIL_BACKEND = os.getenv(
     "EMAIL_BACKEND",
     "django.core.mail.backends.smtp.EmailBackend" if os.getenv("SMTP_PASSWORD") else "django.core.mail.backends.console.EmailBackend",

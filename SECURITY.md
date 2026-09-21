@@ -95,9 +95,9 @@ VarunOps does not support software cracks, activation bypasses, pirated packages
 
 ## Employee onboarding and password safety
 
-- Employee onboarding is gated: PC pairing and first hardware/telemetry sync must complete before email OTP/password setup.
+- Employee onboarding is gated: PC pairing and first hardware/telemetry sync must complete before Admin OTP/password setup.
 - OTP codes are stored only as password hashes and expire after 10 minutes.
 - Permanent employee passwords use Django password hashing and are never returned to the Admin UI. IT only sees password/onboarding status timestamps.
-- Admin-managed employee email is the destination for OTP. Employee self-service cannot silently change that email.
+- Employee verification OTP is delivered through the authenticated Admin Employees page. Employee email is optional contact metadata and is not used to reveal/reset the password.
 
-- On Render Free, OTP email uses the Resend HTTPS API rather than blocked SMTP ports. Use a sending-only API key and a verified sending domain.
+- Admin OTP requires no SMTP/API email provider or sending domain. OTPs expire after 10 minutes and are never stored as plaintext codes.

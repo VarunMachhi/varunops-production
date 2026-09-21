@@ -14,7 +14,7 @@ VarunOps is a Django + Windows PowerShell-agent endpoint-management prototype fo
 4. Employee generates a single-use 8-digit pairing code and downloads the PC Connector.
 5. On the company Windows PC, run `CONNECT_THIS_PC.bat` as Administrator and enter the code.
 6. The agent enrolls with a unique device credential and sends its first full hardware + live-usage report.
-7. Only after the first real report is received, Employee can request a 6-digit OTP sent to the email stored by IT.
+7. Only after the first real report is received, Employee can request a 6-digit OTP shown to IT in the Admin Employees page.
 8. Employee verifies OTP and creates a permanent password. The password is hashed by Django and **is never visible to IT**.
 9. Dashboard unlocks.
 
@@ -70,6 +70,11 @@ Extract and run `START_VARUNOPS.bat`.
 
 ## Cloud deployment
 
-Read `DEPLOY_FREE.md`. The build supports any PostgreSQL `DATABASE_URL`. For a free test deployment with many continuously-reporting endpoints, Supabase Free PostgreSQL is a practical option; Render hosts Django and Resend HTTPS API sends OTP email (Render Free blocks outbound SMTP ports).
+Read `DEPLOY_FREE.md`. The build supports any PostgreSQL `DATABASE_URL`. For a free test deployment, Render can host Django and a PostgreSQL free tier can store data. Employee verification uses Admin-delivered OTP, so no email service or domain is required.
 
 Free tiers are not lifetime guarantees and should not be treated as a production SLA.
+
+
+## Admin OTP onboarding (no domain/email provider required)
+
+Employee password setup now uses a server-generated 6-digit OTP shown only to staff in **Admin → Employees → Pending verification OTPs**. The employee requests the code after the first verified PC sync. The code expires after 10 minutes and can be attempted at most 5 times. The OTP itself is not stored in plaintext; it is derived from a random one-time token plus Django SECRET_KEY. Permanent employee passwords remain one-way hashed and are never shown to IT.

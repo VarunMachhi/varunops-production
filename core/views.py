@@ -7,6 +7,8 @@ import io
 import zipfile
 import logging
 import csv
+import hashlib
+import hmac
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -327,6 +329,7 @@ def bootstrap(request):
             "tickets": SupportTicketSerializer(tickets, many=True).data,
             "network_policies": NetworkPolicySerializer(network_policies, many=True).data,
             "employees": EmployeeProfileSerializer(employees, many=True).data,
+            "password_otps": _active_admin_otps(),
             "unauthorized_count": UnauthorizedSoftware.objects.filter(resolved=False).count(),
         }
         return Response(payload)
@@ -929,8 +932,10 @@ def employee_bootstrap(request):
         "onboarding": {
             "state": profile.onboarding_state,
             "machine_ready": machine_ready,
-            "email_ready": bool((request.user.email or "").strip()),
-            "masked_email": _mask_email(request.user.email or ""),
+            "otp_delivery": "admin",
+            "otp_pending": PasswordResetOTP.objects.filter(
+                user=request.user, used_at__isnull=True, expires_at__gt=timezone.now()
+            ).exists(),
         },
         "apps": _employee_store_apps(machine),
         "software_requests": SoftwareRequestSerializer(software_requests, many=True).data,
@@ -947,7 +952,7 @@ def employee_request_software(request):
         return Response({"detail": "Use the admin console."}, status=403)
     profile = employee_profile_for(request.user)
     if profile.onboarding_state != EmployeeProfile.ONBOARD_ACTIVE:
-        return Response({"detail": "Complete PC connection and email verification before using company software requests."}, status=403)
+        return Response({"detail": "Complete PC connection and IT OTP verification before using company software requests."}, status=403)
     if not profile.assigned_machine_id:
         return Response({"detail": "No managed computer is assigned to your employee account."}, status=409)
     app_slug = str(request.data.get("app_slug", "")).strip()[:64]
@@ -1546,8 +1551,8 @@ def admin_create_employee(request):
     job_title = str(request.data.get("job_title", "")).strip()[:100]
     if not re.fullmatch(r"[a-z0-9._-]{3,150}", username):
         return Response({"detail": "Username must be at least 3 characters and use letters, numbers, dot, underscore or hyphen."}, status=400)
-    if not email or "@" not in email:
-        return Response({"detail": "A valid employee email is required for OTP verification and password setup."}, status=400)
+    if email and "@" not in email:
+        return Response({"detail": "Email is optional, but if provided it must be valid."}, status=400)
     User = get_user_model()
     if User.objects.filter(username=username).exists():
         return Response({"detail": "That username already exists."}, status=409)
@@ -1744,48 +1749,47 @@ def employee_save_asset_details(request):
     return Response({"ok": True, "asset_details": merged})
 
 
-def _send_transactional_email(recipient, subject, message):
-    """Send via Resend HTTPS API on cloud free tiers; fall back to Django email locally/elsewhere."""
-    api_key = os.getenv("RESEND_API_KEY", "").strip()
-    if api_key:
-        payload = json.dumps({
-            "from": settings.DEFAULT_FROM_EMAIL,
-            "to": [recipient],
-            "subject": subject,
-            "text": message,
-        }).encode("utf-8")
-        req = Request(
-            "https://api.resend.com/emails",
-            data=payload,
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "User-Agent": "VarunOps/1.0",
-            },
-        )
-        try:
-            with urlopen(req, timeout=20) as response:
-                if response.status < 200 or response.status >= 300:
-                    raise RuntimeError(f"Resend returned HTTP {response.status}")
-                return True
-        except HTTPError as exc:
-            detail = ""
-            try:
-                detail = exc.read(1000).decode("utf-8", errors="replace")
-            except Exception:
-                pass
-            raise RuntimeError(f"Resend HTTP {exc.code}: {detail[:500]}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"Resend connection failed: {exc.reason}") from exc
-    send_mail(
-        subject=subject,
-        message=message,
-        from_email=settings.DEFAULT_FROM_EMAIL,
-        recipient_list=[recipient],
-        fail_silently=False,
-    )
-    return True
+def _admin_otp_code(user, otp):
+    """Derive a 6-digit code from server secret + one-time token.
+
+    The OTP itself is never stored in plaintext. Staff can view the code because
+    the server can recompute it while the token is active. A database leak alone
+    is not enough to recover the OTP without SECRET_KEY.
+    """
+    raw = str(getattr(otp, "code_hash", "") or "")
+    if not raw.startswith("admin-v1:"):
+        return None
+    token = raw.split(":", 1)[1]
+    msg = f"varunops-admin-otp:{user.pk}:{token}".encode("utf-8")
+    digest = hmac.new(settings.SECRET_KEY.encode("utf-8"), msg, hashlib.sha256).digest()
+    return f"{int.from_bytes(digest[:8], 'big') % 1_000_000:06d}"
+
+
+def _active_admin_otps():
+    now = timezone.now()
+    rows = []
+    qs = PasswordResetOTP.objects.filter(
+        used_at__isnull=True, expires_at__gt=now, user__is_staff=False
+    ).select_related("user").order_by("expires_at")[:200]
+    profile_map = {
+        p.user_id: p for p in EmployeeProfile.objects.filter(user_id__in=[x.user_id for x in qs]).select_related("assigned_machine")
+    }
+    for otp in qs:
+        code = _admin_otp_code(otp.user, otp)
+        if not code:
+            continue
+        profile = profile_map.get(otp.user_id)
+        rows.append({
+            "username": otp.user.username,
+            "employee_name": otp.user.get_full_name() or otp.user.username,
+            "employee_code": profile.employee_code if profile else None,
+            "machine_name": profile.assigned_machine.name if profile and profile.assigned_machine else None,
+            "otp": code,
+            "requested_at": otp.created_at,
+            "expires_at": otp.expires_at,
+            "attempts": otp.attempts,
+        })
+    return rows
 
 
 @api_view(["POST"])
@@ -1800,13 +1804,8 @@ def employee_request_password_otp(request):
     machine = profile.assigned_machine
     agent_version = str((machine.system_info or {}).get("agent_version", ""))
     if not machine.online or not machine.system_info or not machine.metrics_updated_at or not agent_version.startswith("4.2"):
-        return Response({"detail": "PC is paired but the verified Agent 4.2 inventory/telemetry sync is not complete yet. Run the latest UPDATE_EXISTING_AGENT.bat as Administrator and retry."}, status=409)
-    if profile.onboarding_state == EmployeeProfile.ONBOARD_ACTIVE:
-        # The same flow is also safe for future password resets.
-        pass
-    email = (request.user.email or "").strip()
-    if not email or "@" not in email:
-        return Response({"detail": "Your employee account has no valid email. Ask IT to update it."}, status=409)
+        return Response({"detail": "PC is paired but the verified Agent 4.2 inventory/telemetry sync is not complete yet. Run the latest agent update as Administrator and retry."}, status=409)
+
     now = timezone.now()
     newest = PasswordResetOTP.objects.filter(user=request.user).order_by("-created_at").first()
     if newest and (now - newest.created_at).total_seconds() < 60:
@@ -1814,37 +1813,23 @@ def employee_request_password_otp(request):
     recent_count = PasswordResetOTP.objects.filter(user=request.user, created_at__gte=now-timedelta(hours=1)).count()
     if recent_count >= 5:
         return Response({"detail": "Too many OTP requests. Try again later or contact IT."}, status=429)
+
     PasswordResetOTP.objects.filter(user=request.user, used_at__isnull=True).update(used_at=now)
-    code = f"{secrets.randbelow(1000000):06d}"
+    token = secrets.token_hex(24)
     otp = PasswordResetOTP.objects.create(
         user=request.user,
-        code_hash=make_password(code),
-        expires_at=timezone.now() + timedelta(minutes=10),
+        code_hash=f"admin-v1:{token}",
+        expires_at=now + timedelta(minutes=10),
     )
-    try:
-        _send_transactional_email(
-            email,
-            "VarunOps verification code",
-            f"Your VarunOps verification code is {code}. It expires in 10 minutes. If you did not request this, contact IT.",
-        )
-    except Exception as exc:
-        otp.delete()
-        logger.exception("OTP email failed")
-        return Response({"detail": "OTP email could not be sent. IT should verify the SMTP/Resend settings."}, status=502)
-    audit(request, "employee.otp_sent", f"Password verification OTP sent for {request.user.username}", "info", machine=profile.assigned_machine)
-    payload = {"ok": True, "masked_email": _mask_email(email), "expires_in_seconds": 600}
-    if settings.DEBUG and settings.EMAIL_BACKEND.endswith("console.EmailBackend"):
-        payload["development_otp"] = code
-    return Response(payload)
-
-
-def _mask_email(email):
-    try:
-        local, domain = email.split("@", 1)
-        show = local[:2] if len(local) > 2 else local[:1]
-        return show + "***@" + domain
-    except ValueError:
-        return "configured email"
+    code = _admin_otp_code(request.user, otp)
+    notify_staff(
+        "Employee verification OTP requested",
+        f"{request.user.get_full_name() or request.user.username} requested a password verification code. Open Employees to view it.",
+        "warning",
+        "/console/#employees",
+    )
+    audit(request, "employee.otp_requested", f"Admin-delivered OTP requested for {request.user.username}", "info", machine=profile.assigned_machine)
+    return Response({"ok": True, "delivery": "admin", "expires_in_seconds": 600})
 
 
 @api_view(["POST"])
@@ -1870,7 +1855,9 @@ def employee_complete_password_reset(request):
     for candidate in candidates:
         if candidate.attempts >= 5:
             continue
-        if check_password(code, candidate.code_hash):
+        expected = _admin_otp_code(request.user, candidate)
+        valid = secrets.compare_digest(code, expected) if expected else check_password(code, candidate.code_hash)
+        if valid:
             otp = candidate
             break
         candidate.attempts += 1
@@ -1892,7 +1879,7 @@ def employee_complete_password_reset(request):
     profile.email_verified_at = now
     profile.password_changed_at = now
     profile.save(update_fields=["onboarding_state", "email_verified_at", "password_changed_at", "updated_at"])
-    notify_user(request.user, "Setup complete", "Your email is verified and your permanent VarunOps password is active.", "success", "/employee/")
+    notify_user(request.user, "Setup complete", "Your IT verification code was accepted and your permanent VarunOps password is active.", "success", "/employee/")
     audit(request, "employee.password_set", f"{request.user.username} completed secure onboarding", "success", machine=profile.assigned_machine)
     return Response({"ok": True, "onboarding_state": profile.onboarding_state})
 
@@ -1910,8 +1897,8 @@ def admin_update_employee(request, username):
     profile, _ = EmployeeProfile.objects.get_or_create(user=user)
     email = str(request.data.get("email", user.email or "")).strip()[:254]
     employee_code = str(request.data.get("employee_code", profile.employee_code or "")).strip()[:40]
-    if not email or "@" not in email:
-        return Response({"detail": "A valid employee email is required for OTP verification."}, status=400)
+    if email and "@" not in email:
+        return Response({"detail": "Email is optional, but if provided it must be valid."}, status=400)
     if employee_code and EmployeeProfile.objects.filter(employee_code=employee_code).exclude(pk=profile.pk).exists():
         return Response({"detail": "That employee code already exists."}, status=409)
     old_email = user.email
@@ -1924,9 +1911,7 @@ def admin_update_employee(request, username):
     profile.branch = str(request.data.get("branch", profile.branch)).strip()[:120]
     profile.job_title = str(request.data.get("job_title", profile.job_title)).strip()[:100]
     profile.phone = str(request.data.get("phone", profile.phone)).strip()[:30]
-    if old_email.casefold() != email.casefold():
-        profile.email_verified_at = None
-    profile.save(update_fields=["employee_code", "department", "branch", "job_title", "phone", "email_verified_at", "updated_at"])
+    profile.save(update_fields=["employee_code", "department", "branch", "job_title", "phone", "updated_at"])
     audit(request, "employee.update", f"Updated employee account {username}", "info", machine=profile.assigned_machine, metadata={"email_changed": old_email.casefold() != email.casefold()})
     return Response(EmployeeProfileSerializer(profile).data)
 
@@ -2048,6 +2033,7 @@ def admin_reissue_temp_password(request, username):
     password = secrets.token_urlsafe(12)
     user.set_password(password)
     user.save(update_fields=["password"])
+    PasswordResetOTP.objects.filter(user=user, used_at__isnull=True).update(used_at=timezone.now())
     profile.temporary_password_issued_at = timezone.now()
     profile.onboarding_state = EmployeeProfile.ONBOARD_VERIFY_EMAIL if profile.assigned_machine_id else EmployeeProfile.ONBOARD_PAIR_DEVICE
     profile.save(update_fields=["temporary_password_issued_at", "onboarding_state", "updated_at"])
