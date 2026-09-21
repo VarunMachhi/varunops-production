@@ -1,4 +1,3 @@
-VarunOps Pro Onboarding60
-Build date: 2026-09-21
-Base: FIX502
-Features: gated employee onboarding, full first PC sync, Resend HTTPS OTP, expanded Windows inventory, manual asset fields, asset CSV export, 60-device telemetry optimization.
+VarunOps Pro Onboarding60 FIXSYNC
+Agent: 4.2 PowerShell
+Fix: legacy EXE scheduled-task migration + strict first-sync verification

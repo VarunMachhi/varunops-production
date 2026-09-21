@@ -1,3 +1,7 @@
+# IMPORTANT — FIXSYNC build
+
+If an already-connected PC remains on “Finishing first PC scan”, download a fresh connector from the employee portal and run **UPDATE_EXISTING_AGENT.bat as Administrator**. This build migrates legacy EXE scheduled tasks to PowerShell Agent 4.2 and only reports SUCCESS after the cloud server accepts fresh hardware + telemetry.
+
 # VarunOps Pro — Employee Onboarding + 60 Device Build
 
 VarunOps is a Django + Windows PowerShell-agent endpoint-management prototype for company PCs.

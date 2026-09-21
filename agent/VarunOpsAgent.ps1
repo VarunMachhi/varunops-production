@@ -34,7 +34,7 @@ function Save-Config($cfg) {
 
 function Invoke-AgentApi([string]$Path,[string]$Method='GET',$Body=$null,$ExtraHeaders=@{}) {
   $cfg = Load-Config
-  $headers = @{ 'Accept'='application/json'; 'User-Agent'='VarunOps-AgentPS/4.1' }
+  $headers = @{ 'Accept'='application/json'; 'User-Agent'='VarunOps-AgentPS/4.2' }
   if ($cfg.agent_id -and $cfg.agent_key) {
     $headers['X-Agent-ID'] = [string]$cfg.agent_id
     $headers['X-Agent-Key'] = [string]$cfg.agent_key
@@ -162,7 +162,7 @@ function Get-SystemInfo {
     resolution=$resolution
     mouse_devices=$mouse
     keyboard_devices=$keyboard
-    agent_version='4.1-powershell'
+    agent_version='4.2-powershell'
   }
 }
 
@@ -391,7 +391,11 @@ function Agent-Cycle {
     $heartbeat['software_inventory']=$inventory
   }
 
-  Invoke-AgentApi '/api/agent/heartbeat/' 'POST' $heartbeat | Out-Null
+  $ack=Invoke-AgentApi '/api/agent/heartbeat/' 'POST' $heartbeat
+  if(-not $ack -or -not [bool]$ack.ok) { throw 'Heartbeat was not acknowledged by VarunOps server.' }
+  if($inventoryDue -and -not [bool]$ack.system_info_received) { throw 'Server did not accept the full hardware inventory.' }
+  if(-not [bool]$ack.metrics_received) { throw 'Server did not accept device telemetry.' }
+  Write-AgentLog ("Heartbeat accepted. ready="+[string]$ack.machine_ready+" metrics="+[string]$ack.metrics_received+" inventory="+[string]$ack.system_info_received)
   if($inventoryDue) {
     $cfg=Load-Config
     $cfg | Add-Member -NotePropertyName last_inventory_utc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
@@ -402,10 +406,21 @@ function Agent-Cycle {
   Process-AgentTasks $dryRun
 }
 
-$once = $args -contains '--once'
+$strictOnce = $args -contains '--once-strict'
+$once = ($args -contains '--once') -or $strictOnce
 do {
-  try { Agent-Cycle } catch { Write-AgentLog ("Cycle failed: "+$_.Exception.Message) }
+  try {
+    Agent-Cycle
+    if($strictOnce) { Write-Host 'VarunOps strict sync accepted.' -ForegroundColor Green }
+  } catch {
+    Write-AgentLog ("Cycle failed: "+$_.Exception.Message)
+    if($strictOnce) {
+      Write-Error ("VarunOps strict sync failed: "+$_.Exception.Message)
+      exit 2
+    }
+  }
   if ($once) { break }
   try { $cfg=Load-Config; $seconds=[Math]::Max(30,[Math]::Min(300,[int]$cfg.poll_seconds)) } catch {$seconds=60}
   Start-Sleep -Seconds $seconds
 } while ($true)
+exit 0

@@ -100,7 +100,7 @@ def employee_agent_package(request):
         return JsonResponse({"detail": "Staff accounts use the admin console."}, status=403)
     base_url = request.build_absolute_uri("/").rstrip("/")
     agent_dir = settings.BASE_DIR / "agent"
-    files = ["VarunOpsAgent.ps1", "install_agent.ps1", "update_agent.ps1"]
+    files = ["VarunOpsAgent.ps1", "install_agent.ps1", "update_agent.ps1", "CHECK_AGENT.bat"]
     for name in files:
         if not (agent_dir / name).exists():
             return JsonResponse({"detail": f"Agent package is missing {name}."}, status=500)
@@ -147,7 +147,7 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo Agent updated. Keep the PC online for about a minute.
+echo Agent repaired and verified. Refresh VarunOps in 10-20 seconds.
 pause
 """
     readme = f"""VarunOps PC Connector
@@ -159,7 +159,7 @@ NEW PC
 4. Run CONNECT_THIS_PC.bat as Administrator and enter the code.
 
 EXISTING VARUNOPS PC
-If this PC is already paired but the portal says the first full scan is incomplete, run UPDATE_EXISTING_AGENT.bat as Administrator. It preserves the existing device registration and upgrades the inventory collector.
+If this PC is already paired but the portal says the first full scan is incomplete, run UPDATE_EXISTING_AGENT.bat as Administrator. It preserves the existing device registration, replaces legacy EXE scheduled tasks, runs a strict server sync test, and upgrades the inventory collector.
 
 The first install starts in TEST mode. Software commands remain queued until IT intentionally enables LIVE actions from the Admin device page.
 """
@@ -730,7 +730,22 @@ def agent_heartbeat(request):
         if auto_count:
             audit(request, "policy.auto_queue", f"Automatic policy queued {auto_count} update(s) for {machine.name}", "info", machine=machine)
 
-    return Response({"ok": True, "server_time": timezone.now().isoformat(), "policy": machine.policy, "compliance_mode": machine.compliance_mode, "network_policy_revision": machine.network_policy.revision if machine.network_policy_id else None})
+    machine.refresh_from_db(fields=["system_info", "live_metrics", "metrics_updated_at", "last_seen"])
+    system_info_received = bool(machine.system_info)
+    metrics_received = bool(machine.metrics_updated_at and machine.live_metrics)
+    agent_version = str((machine.system_info or {}).get("agent_version", ""))
+    machine_ready = bool(system_info_received and metrics_received and agent_version.startswith("4.2"))
+    return Response({
+        "ok": True,
+        "server_time": timezone.now().isoformat(),
+        "policy": machine.policy,
+        "compliance_mode": machine.compliance_mode,
+        "network_policy_revision": machine.network_policy.revision if machine.network_policy_id else None,
+        "system_info_received": system_info_received,
+        "metrics_received": metrics_received,
+        "machine_ready": machine_ready,
+        "agent_version": agent_version,
+    })
 
 
 @api_view(["GET"])
@@ -891,9 +906,8 @@ def employee_bootstrap(request):
     agent_version = str((machine.system_info or {}).get("agent_version", "")) if machine else ""
     machine_ready = bool(
         machine and machine.online and machine.system_info and machine.metrics_updated_at
-        and agent_version.startswith("4.1")
-        and (machine.system_info or {}).get("cpu_name")
-        and (machine.system_info or {}).get("memory_modules") is not None
+        and agent_version.startswith("4.2")
+        and ((machine.system_info or {}).get("hostname") or machine.name)
     )
     return Response({
         "profile": EmployeeProfileSerializer(profile).data,
@@ -1770,8 +1784,9 @@ def employee_request_password_otp(request):
     if not profile.assigned_machine_id:
         return Response({"detail": "Connect your company PC before setting your permanent password."}, status=409)
     machine = profile.assigned_machine
-    if not machine.online or not machine.system_info or not machine.metrics_updated_at:
-        return Response({"detail": "PC is paired but the first inventory/telemetry sync is not complete yet. Keep the PC online for about a minute and retry."}, status=409)
+    agent_version = str((machine.system_info or {}).get("agent_version", ""))
+    if not machine.online or not machine.system_info or not machine.metrics_updated_at or not agent_version.startswith("4.2"):
+        return Response({"detail": "PC is paired but the verified Agent 4.2 inventory/telemetry sync is not complete yet. Run the latest UPDATE_EXISTING_AGENT.bat as Administrator and retry."}, status=409)
     if profile.onboarding_state == EmployeeProfile.ONBOARD_ACTIVE:
         # The same flow is also safe for future password resets.
         pass
