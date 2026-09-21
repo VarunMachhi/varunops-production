@@ -41,7 +41,7 @@ This starter is designed to reduce dangerous defaults, but **no application shou
 1. Use a long random `SECRET_KEY` and `AGENT_ENROLLMENT_TOKEN`. Never commit `.env`.
 2. Use HTTPS end-to-end from clients to the public reverse proxy. Keep TLS verification enabled in the agent.
 3. Set exact `ALLOWED_HOSTS` and `CSRF_TRUSTED_ORIGINS`; do not use `*`.
-4. Use PostgreSQL/Neon with restricted database credentials and backups.
+4. Use PostgreSQL (for example Supabase/Neon) with restricted database credentials and backups.
 5. Put rate limiting/WAF controls at the edge. DRF's cache-backed throttle is not a substitute for network controls.
 6. Create individual admin accounts, enable MFA through your identity layer/admin access strategy, and avoid sharing passwords.
 7. Rotate the enrollment token after enrollment batches. Disable lost or retired machines.
@@ -70,7 +70,7 @@ This starter is designed to reduce dangerous defaults, but **no application shou
 - Allowlist browser policy is not equivalent to a DNS/firewall gateway and does not claim to control every application.
 - Strict allow-only executable enforcement (WDAC/AppLocker) is deliberately not auto-generated/applied because a bad policy can lock legitimate endpoints. Stage that capability separately with audit mode and signed policies.
 - Device pairing requires a short-lived, single-use code that can only be generated from an authenticated employee session; the employee account must not already have an assigned managed PC.
-- Telemetry is capped and retained as a rolling 48-hour high-resolution metric window.
+- Telemetry stores the latest state plus approximately 15-minute samples with a rolling 7-day history.
 
 ## Software licensing policy
 
@@ -91,3 +91,13 @@ VarunOps does not support software cracks, activation bypasses, pirated packages
 - The Windows agent computes SHA-256 after download and refuses execution on mismatch.
 - Only EXE/MSI types and bounded argument arrays are accepted.
 - Every newly paired PC starts in TEST mode; command/remediation dequeue is blocked server-side until an administrator enables LIVE actions on that specific device.
+
+
+## Employee onboarding and password safety
+
+- Employee onboarding is gated: PC pairing and first hardware/telemetry sync must complete before email OTP/password setup.
+- OTP codes are stored only as password hashes and expire after 10 minutes.
+- Permanent employee passwords use Django password hashing and are never returned to the Admin UI. IT only sees password/onboarding status timestamps.
+- Admin-managed employee email is the destination for OTP. Employee self-service cannot silently change that email.
+
+- On Render Free, OTP email uses the Resend HTTPS API rather than blocked SMTP ports. Use a sending-only API key and a verified sending domain.

@@ -19,6 +19,10 @@ urlpatterns = [
     path("network-policies/assign/", views.admin_network_policy_assign, name="admin_network_policy_assign"),
     path("catalog/save/", views.admin_catalog_save, name="admin_catalog_save"),
     path("employees/create/", views.admin_create_employee, name="admin_create_employee"),
+    path("employees/<str:username>/update/", views.admin_update_employee, name="admin_update_employee"),
+    path("employees/<str:username>/reissue-temp/", views.admin_reissue_temp_password, name="admin_reissue_temp_password"),
+    path("devices/asset-details/", views.admin_machine_asset_details, name="admin_machine_asset_details"),
+    path("devices/export-assets.csv", views.admin_export_asset_csv, name="admin_export_asset_csv"),
 
     # Employee portal API
     path("employee/bootstrap/", views.employee_bootstrap, name="employee_bootstrap"),
@@ -27,6 +31,9 @@ urlpatterns = [
     path("employee/tickets/", views.employee_create_ticket, name="employee_create_ticket"),
     path("employee/device-pairing/", views.employee_create_pairing_code, name="employee_create_pairing_code"),
     path("employee/profile/", views.employee_update_profile, name="employee_update_profile"),
+    path("employee/asset-details/", views.employee_save_asset_details, name="employee_save_asset_details"),
+    path("employee/password/request-otp/", views.employee_request_password_otp, name="employee_request_password_otp"),
+    path("employee/password/complete/", views.employee_complete_password_reset, name="employee_complete_password_reset"),
     path("tickets/<uuid:ticket_id>/messages/", views.ticket_add_message, name="ticket_add_message"),
     path("notifications/<int:notification_id>/read/", views.notification_read, name="notification_read"),
     path("notifications/read-all/", views.notifications_read_all, name="notifications_read_all"),

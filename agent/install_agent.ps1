@@ -17,7 +17,7 @@ New-Item -ItemType Directory -Path $dir -Force | Out-Null
 Copy-Item $source (Join-Path $dir 'VarunOpsAgent.ps1') -Force
 @{
   server_url=$ServerUrl.TrimEnd('/'); pairing_code=$PairingCode; branch=$Branch; device_type=$DeviceType;
-  poll_seconds=15
+  poll_seconds=60
 } | ConvertTo-Json | Set-Content (Join-Path $dir 'agent.json') -Encoding UTF8
 icacls $dir /inheritance:r | Out-Null
 icacls $dir /grant:r 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null

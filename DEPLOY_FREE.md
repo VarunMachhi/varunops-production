@@ -1,129 +1,82 @@
-# VarunOps — Free deployment for real testing
+# VarunOps — Free test deployment
 
-> Free tiers are useful for testing and small hobby deployments. No vendor can guarantee that a free tier will exist forever or remain always-on.
+Free tiers can change and do not provide a lifetime/production availability guarantee.
 
-## Recommended current stack
+## Suggested test stack
 
-- **Web app:** Render Free Web Service
-- **Persistent database:** Neon Free PostgreSQL
-- **Ticket screenshots:** stored as small authenticated blobs in PostgreSQL, so they survive Render restarts
-- **Windows endpoints:** VarunOps PowerShell agent installed from the Employee Portal
+- Django web/API: Render Free Web Service
+- PostgreSQL: Supabase Free Postgres (or another compatible PostgreSQL service)
+- OTP email: Resend Free HTTPS API
+- Endpoints: Windows PowerShell VarunOps Agent
 
-Do **not** use Render Free Postgres for persistent VarunOps data. Its free database has a limited lifetime. Use Neon through `DATABASE_URL`.
+## 1. PostgreSQL
 
-## 1. Put this project on GitHub
+Create a Supabase project and copy a PostgreSQL connection string suitable for your hosting environment. Put the complete PostgreSQL URI in Render as `DATABASE_URL`.
 
-Create a private repository and upload the project root (the folder containing `manage.py` and `render.yaml`). Never commit `.env`, `db.sqlite3`, agent credentials, or real passwords.
+Do not use SQLite on Render: the free web-service filesystem is ephemeral.
 
-## 2. Create Neon PostgreSQL
+## 2. Resend OTP email
 
-1. Create a Neon account/project.
-2. Copy the PostgreSQL connection string from Neon.
-3. Prefer the pooled connection string when Neon offers it.
-4. Keep `sslmode=require` in the connection string.
+Render Free blocks outbound SMTP ports, so this build uses the **Resend HTTPS API** instead of SMTP when `RESEND_API_KEY` is configured.
 
-Example only:
+Create a Resend **sending-only** API key. For real employee recipients, verify a sending domain in Resend and use an address on that domain as `DEFAULT_FROM_EMAIL`.
 
-`postgresql://USER:PASSWORD@HOST/DB?sslmode=require`
+Render environment values:
 
-## 3. Create Render Web Service
+- `RESEND_API_KEY=<Resend sending API key>`
+- `DEFAULT_FROM_EMAIL=VarunOps <it@your-verified-domain>`
 
-Use **New > Blueprint** (or Web Service) and connect the GitHub repository. `render.yaml` already contains the build/start commands.
+Local/non-Render environments can still use the optional Django SMTP fallback from `.env.example`.
 
-Add these environment values in Render:
+## 3. GitHub + Render
 
-- `DATABASE_URL` = Neon connection string
-- `ADMIN_PASSWORD` = unique 14+ character password
-- `ADMIN_EMAIL` = your email
+Push the project root (contains `manage.py` + `render.yaml`) to a **private** GitHub repository. Do not commit `.env`, `db.sqlite3`, passwords, API keys or device credentials.
 
-Render generates `SECRET_KEY` and `AGENT_ENROLLMENT_TOKEN`. `RENDER_EXTERNAL_HOSTNAME` is used automatically by Django for host/CSRF configuration.
+Create a Render Blueprint/Web Service from the repository. `render.yaml` contains the build/start commands.
 
-Deploy. The start command runs migrations, creates the admin when needed, and launches Gunicorn.
+Set these required Render values:
+- `DATABASE_URL`
+- `ADMIN_PASSWORD`
+- `ADMIN_EMAIL`
+- `RESEND_API_KEY`
+- `DEFAULT_FROM_EMAIL`
 
-## 4. First real login
+Render generates `SECRET_KEY` and `AGENT_ENROLLMENT_TOKEN`.
 
-Open:
+Deployment start command applies migrations, creates/updates the production admin and starts Gunicorn.
 
-`https://YOUR-SERVICE.onrender.com/login/`
+## 4. Employee onboarding
 
-Username defaults to `admin`. Use the `ADMIN_PASSWORD` you configured.
+Admin > Employees > Add employee:
+- username
+- employee code
+- first/last name
+- email for OTP
+- department
+- branch
+- job title
 
-## 5. Add employee and PC
+Copy the temporary password once and send it privately.
 
-1. Admin > **Employees** > Add employee.
-2. Give the employee their temporary credentials privately.
-3. Employee signs in > completes **Profile**.
-4. Employee opens **My PC** > **Generate code**.
-5. Employee downloads **PC Connector**.
-6. On that Windows PC: extract ZIP > run `CONNECT_THIS_PC.bat` as Administrator > enter pairing code.
-7. Within the next polling cycles, Admin > **Devices** shows hardware, software, CPU/RAM/storage, last-seen, and power events.
+Employee login is restricted to onboarding until:
+- PC is paired,
+- first hardware + telemetry report arrives,
+- email OTP is verified,
+- a permanent password is set.
 
-## 6. Test before enabling changes
+IT can edit the employee email/details and reissue a temporary password. IT never receives the final permanent password.
 
-Every new PC starts with software execution **TEST** mode.
+## 5. Connect Windows PC
 
-First confirm:
-- correct employee-PC pairing
-- accurate inventory
-- correct approved software list
-- correct website policy
-- no false unauthorized-software alerts
+Employee generates a pairing code, downloads PC Connector, extracts it and runs `CONNECT_THIS_PC.bat` as Administrator. Keep the PC online for the first full report (normally around a minute).
 
-Then Admin > **Devices** > **Details** > **Enable LIVE actions**.
+New PCs start in TEST software-execution mode. Verify the device/inventory/policies, then enable LIVE actions from Admin > Devices > Details.
 
-## 7. Software Store — where does the installer come from?
+## 6. Scale notes for 60+ devices
 
-### Preferred: Winget
+Default agent reporting is intentionally reduced:
+- live telemetry ~60 sec
+- software inventory ~15 min
+- sampled telemetry ~15 min / 7-day retention
 
-Admin > Software > Add software:
-- Source: Winget
-- Winget ID: e.g. vendor/package identifier
-- Detection name(s)
-- version/license notes
-
-The endpoint asks Winget to install/update/uninstall that exact package.
-
-### Direct EXE/MSI
-
-Use only a vendor/company-controlled HTTPS URL.
-
-Required fields:
-- HTTPS installer URL
-- EXE or MSI
-- exact SHA-256 checksum
-- silent install/update arguments
-- detection name(s)
-
-The agent downloads the file, computes SHA-256, and refuses to execute if it does not match.
-
-Do not put cracks, license bypass scripts, or pirated installers into VarunOps.
-
-## 8. Software policy
-
-Per PC, set catalog apps as:
-- **Required** — must exist; Enforce mode queues an install when missing
-- **Optional** — appears in that employee's company store; employee can request it
-- **Blocked** — cannot be requested and Enforce mode removes a catalog-installed blocked app
-
-If a PC has any explicit app policies, employee Software becomes a strict per-PC allowlist.
-
-Unknown software is detected from Windows inventory and creates an Admin warning. Admin can allow that name as a per-PC exception or queue an uninstall attempt. Detection alone cannot reliably prove which human installed it.
-
-## 9. Website policies
-
-Create Allowlist or Blocklist policies and assign them per PC.
-
-Current enforcement uses managed policy keys for Microsoft Edge and Google Chrome. This does not claim to block every possible browser/application. For true all-app internet filtering use a DNS/Secure Web Gateway in addition to VarunOps.
-
-## 10. Free-tier limitations
-
-- Render Free Web Services may sleep when idle and have no production SLA.
-- Agent traffic may keep a service active during working hours.
-- Neon Free has usage/storage limits.
-- Free-plan terms and limits can change in the future.
-
-For a clinic/company production rollout where downtime matters, move the web service/database to paid tiers after testing.
-
-
-### Render generated secrets
-`render.yaml` uses `generateValue: true` for `SECRET_KEY` and `AGENT_ENROLLMENT_TOKEN`. Render generates a random Base64-encoded 256-bit value (typically 44 characters), which this build accepts as a strong production secret. Do not replace it with a short human password.
+60 continuously reporting endpoints can generate a meaningful amount of HTTP and database traffic. Monitor Render/Supabase usage dashboards and storage. Avoid storing large ticket screenshots in the database and move to paid hosting/storage if uptime, backups or limits become important.

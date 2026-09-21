@@ -39,6 +39,7 @@ class Machine(models.Model):
     live_metrics = models.JSONField(default=dict, blank=True)
     metrics_updated_at = models.DateTimeField(null=True, blank=True)
     agent_live_mode = models.BooleanField(default=False)
+    asset_details = models.JSONField(default=dict, blank=True)
 
     class Meta:
         ordering = ["name"]
@@ -185,6 +186,19 @@ class EmployeeProfile(models.Model):
     branch = models.CharField(max_length=120, blank=True)
     phone = models.CharField(max_length=30, blank=True)
     assigned_machine = models.ForeignKey(Machine, on_delete=models.SET_NULL, null=True, blank=True, related_name="assigned_employees")
+    ONBOARD_PAIR_DEVICE = "pair_device"
+    ONBOARD_VERIFY_EMAIL = "verify_email"
+    ONBOARD_ACTIVE = "active"
+    ONBOARD_CHOICES = [
+        (ONBOARD_PAIR_DEVICE, "Connect company PC"),
+        (ONBOARD_VERIFY_EMAIL, "Verify email and set password"),
+        (ONBOARD_ACTIVE, "Active"),
+    ]
+    onboarding_state = models.CharField(max_length=20, choices=ONBOARD_CHOICES, default=ONBOARD_PAIR_DEVICE)
+    temporary_password_issued_at = models.DateTimeField(null=True, blank=True)
+    email_verified_at = models.DateTimeField(null=True, blank=True)
+    password_changed_at = models.DateTimeField(null=True, blank=True)
+    asset_details = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -193,6 +207,21 @@ class EmployeeProfile(models.Model):
 
     def __str__(self):
         return self.user.get_full_name() or self.user.username
+
+
+
+
+class PasswordResetOTP(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="varunops_password_otps")
+    code_hash = models.CharField(max_length=255)
+    expires_at = models.DateTimeField()
+    attempts = models.PositiveSmallIntegerField(default=0)
+    used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["user", "used_at", "expires_at"], name="core_otp_user_state_idx")]
 
 
 class SoftwareRequest(models.Model):

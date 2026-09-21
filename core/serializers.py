@@ -78,7 +78,7 @@ class MachineSerializer(serializers.ModelSerializer):
         model = Machine
         fields = [
             "id", "name", "branch", "device_type", "ip_address", "os_version",
-            "serial_number", "policy", "tags", "system_info", "last_seen",
+            "serial_number", "policy", "tags", "system_info", "asset_details", "last_seen",
             "enrolled_at", "enabled", "online", "installed_apps", "detected_software", "compliance_mode", "network_policy", "network_policy_name", "last_boot_at", "latest_metric", "metrics_updated_at", "agent_live_mode", "unauthorized_software", "app_policies", "recent_power_events",
         ]
 
@@ -103,7 +103,7 @@ class EmployeeMachineSerializer(serializers.ModelSerializer):
         model = Machine
         fields = [
             "id", "name", "branch", "device_type", "ip_address", "os_version",
-            "serial_number", "tags", "system_info", "last_seen", "online", "installed_apps", "compliance_mode", "network_policy_name", "last_boot_at", "latest_metric", "metrics_updated_at", "agent_live_mode", "recent_power_events",
+            "serial_number", "tags", "system_info", "asset_details", "last_seen", "online", "installed_apps", "compliance_mode", "network_policy_name", "last_boot_at", "latest_metric", "metrics_updated_at", "agent_live_mode", "recent_power_events",
         ]
 
     def get_latest_metric(self, obj):
@@ -118,14 +118,29 @@ class EmployeeMachineSerializer(serializers.ModelSerializer):
 
 class EmployeeProfileSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source="user.username", read_only=True)
+    first_name = serializers.CharField(source="user.first_name", read_only=True)
+    last_name = serializers.CharField(source="user.last_name", read_only=True)
     full_name = serializers.SerializerMethodField()
     email = serializers.CharField(source="user.email", read_only=True)
     assigned_machine_id = serializers.UUIDField(source="assigned_machine.id", allow_null=True, read_only=True)
     assigned_machine_name = serializers.CharField(source="assigned_machine.name", allow_null=True, read_only=True)
 
+    password_status = serializers.SerializerMethodField()
+
     class Meta:
         model = EmployeeProfile
-        fields = ["username", "full_name", "email", "employee_code", "job_title", "department", "branch", "phone", "assigned_machine_id", "assigned_machine_name"]
+        fields = [
+            "username", "first_name", "last_name", "full_name", "email", "employee_code", "job_title", "department", "branch", "phone",
+            "assigned_machine_id", "assigned_machine_name", "onboarding_state", "temporary_password_issued_at",
+            "email_verified_at", "password_changed_at", "password_status", "asset_details",
+        ]
+
+    def get_password_status(self, obj):
+        if obj.password_changed_at:
+            return "Permanent password set"
+        if obj.temporary_password_issued_at:
+            return "Temporary password issued"
+        return "Not initialized"
 
     def get_full_name(self, obj):
         return obj.user.get_full_name() or obj.user.username

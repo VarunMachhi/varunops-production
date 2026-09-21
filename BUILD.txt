@@ -1,6 +1,4 @@
-VarunOps Pro RealDeploy FIX501
-
-Fixes:
-- verify_workspace management command now aliases the database Command model as AgentCommand, preventing class-name shadowing and the AttributeError: type object 'Command' has no attribute 'objects'.
-- Django model index names are explicitly aligned with packaged migration index names to prevent false pending-model-change warnings on Django 6.
-- Existing FIX500 startup/repair behavior retained.
+VarunOps Pro Onboarding60
+Build date: 2026-09-21
+Base: FIX502
+Features: gated employee onboarding, full first PC sync, Resend HTTPS OTP, expanded Windows inventory, manual asset fields, asset CSV export, 60-device telemetry optimization.

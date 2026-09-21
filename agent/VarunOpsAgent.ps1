@@ -34,7 +34,7 @@ function Save-Config($cfg) {
 
 function Invoke-AgentApi([string]$Path,[string]$Method='GET',$Body=$null,$ExtraHeaders=@{}) {
   $cfg = Load-Config
-  $headers = @{ 'Accept'='application/json'; 'User-Agent'='VarunOps-AgentPS/3.0' }
+  $headers = @{ 'Accept'='application/json'; 'User-Agent'='VarunOps-AgentPS/4.1' }
   if ($cfg.agent_id -and $cfg.agent_key) {
     $headers['X-Agent-ID'] = [string]$cfg.agent_id
     $headers['X-Agent-Key'] = [string]$cfg.agent_key
@@ -48,11 +48,34 @@ function Invoke-AgentApi([string]$Path,[string]$Method='GET',$Body=$null,$ExtraH
   return Invoke-RestMethod @params
 }
 
-function Get-SerialNumber { try { return [string](Get-CimInstance Win32_BIOS).SerialNumber } catch { return '' } }
+function Clean-HardwareValue([string]$Value) {
+  $v=([string]$Value).Trim()
+  if (-not $v) { return '' }
+  $bad=@('default string','to be filled by o.e.m.','to be filled by oem','system serial number','none','n/a','unknown','not specified')
+  if ($bad -contains $v.ToLowerInvariant()) { return '' }
+  return $v
+}
+function Get-SerialNumber {
+  try {
+    $candidates=@(
+      (Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty SerialNumber),
+      (Get-CimInstance Win32_ComputerSystemProduct -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty IdentifyingNumber)
+    )
+    foreach($candidate in $candidates) { $clean=Clean-HardwareValue ([string]$candidate); if($clean){ return $clean } }
+  } catch {}
+  return ''
+}
 function Get-LocalIp {
   try {
     $ip = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object { $_.IPAddress -notlike '169.254*' -and $_.IPAddress -ne '127.0.0.1' } | Sort-Object InterfaceMetric | Select-Object -First 1 -ExpandProperty IPAddress
     return [string]$ip
+  } catch { return '' }
+}
+
+function Convert-WmiCharArray($Value) {
+  try {
+    $chars=@($Value | Where-Object { $_ -gt 0 } | ForEach-Object { [char][int]$_ })
+    return (-join $chars).Trim()
   } catch { return '' }
 }
 
@@ -61,7 +84,9 @@ function Get-SystemInfo {
   $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
   $os = Get-CimInstance Win32_OperatingSystem
   $bios = Get-CimInstance Win32_BIOS | Select-Object -First 1
-  $gpu = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.Name } | Where-Object { $_ })
+  $board = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue | Select-Object -First 1
+  $gpuRows = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+  $gpu = @($gpuRows | ForEach-Object { [string]$_.Name } | Where-Object { $_ })
   $ram = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue | ForEach-Object {
     @{capacity_gb=[Math]::Round(([double]$_.Capacity)/1GB,2);manufacturer=[string]$_.Manufacturer;part_number=([string]$_.PartNumber).Trim();serial=([string]$_.SerialNumber).Trim();speed_mhz=[int]$_.Speed}
   })
@@ -71,6 +96,39 @@ function Get-SystemInfo {
   $net = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue | ForEach-Object {
     @{description=[string]$_.Description;mac=[string]$_.MACAddress;ip_addresses=@($_.IPAddress | Select-Object -First 6)}
   })
+  $monitors=@()
+  try {
+    $ids=@(Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID -ErrorAction Stop)
+    $params=@(Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorBasicDisplayParams -ErrorAction SilentlyContinue)
+    foreach($m in $ids) {
+      $instance=[string]$m.InstanceName
+      $param=$params | Where-Object { [string]$_.InstanceName -eq $instance } | Select-Object -First 1
+      $widthCm=0; $heightCm=0; $diag=''
+      if($param) {
+        $widthCm=[int]$param.MaxHorizontalImageSize; $heightCm=[int]$param.MaxVerticalImageSize
+        if($widthCm -gt 0 -and $heightCm -gt 0) { $diag=('{0:N1}' -f ([Math]::Sqrt(($widthCm*$widthCm)+($heightCm*$heightCm))/2.54)) }
+      }
+      $monitors += @{
+        manufacturer=(Convert-WmiCharArray $m.ManufacturerName)
+        model=(Convert-WmiCharArray $m.UserFriendlyName)
+        serial=(Convert-WmiCharArray $m.SerialNumberID)
+        mfg_week=[int]$m.WeekOfManufacture
+        mfg_year=[int]$m.YearOfManufacture
+        width_cm=$widthCm
+        height_cm=$heightCm
+        diagonal_inches=$diag
+      }
+    }
+  } catch {}
+  $mouse=@(Get-CimInstance Win32_PointingDevice -ErrorAction SilentlyContinue | ForEach-Object {
+    @{name=[string]$_.Name;manufacturer=[string]$_.Manufacturer;pnp_id=[string]$_.PNPDeviceID}
+  } | Select-Object -First 10)
+  $keyboard=@(Get-CimInstance Win32_Keyboard -ErrorAction SilentlyContinue | ForEach-Object {
+    @{name=[string]$_.Name;manufacturer=[string]$_.Manufacturer;description=[string]$_.Description;pnp_id=[string]$_.PNPDeviceID}
+  } | Select-Object -First 10)
+  $resolution=''
+  $activeGpu=$gpuRows | Where-Object { $_.CurrentHorizontalResolution -and $_.CurrentVerticalResolution } | Select-Object -First 1
+  if($activeGpu) { $resolution="$($activeGpu.CurrentHorizontalResolution) x $($activeGpu.CurrentVerticalResolution)" }
   return @{
     hostname=$env:COMPUTERNAME
     manufacturer=[string]$cs.Manufacturer
@@ -78,8 +136,11 @@ function Get-SystemInfo {
     system_type=[string]$cs.SystemType
     processor=[string]$cpu.Name
     cpu_name=[string]$cpu.Name
+    cpu_id=([string]$cpu.ProcessorId).Trim()
+    cpu_manufacturer=[string]$cpu.Manufacturer
     cpu_cores=[int]$cpu.NumberOfCores
     cpu_logical_processors=[int]$cpu.NumberOfLogicalProcessors
+    cpu_max_clock_mhz=[int]$cpu.MaxClockSpeed
     memory=('{0:N1} GB' -f ($cs.TotalPhysicalMemory/1GB))
     memory_total_gb=[Math]::Round(([double]$cs.TotalPhysicalMemory)/1GB,2)
     memory_modules=$ram
@@ -93,8 +154,15 @@ function Get-SystemInfo {
     os_build=[string]$os.BuildNumber
     os_architecture=[string]$os.OSArchitecture
     bios_version=[string]$bios.SMBIOSBIOSVersion
-    bios_serial=([string]$bios.SerialNumber).Trim()
-    agent_version='3.1-powershell'
+    bios_serial=(Clean-HardwareValue ([string]$bios.SerialNumber))
+    motherboard_manufacturer= if($board){[string]$board.Manufacturer}else{''}
+    motherboard_model= if($board){[string]$board.Product}else{''}
+    motherboard_serial= if($board){Clean-HardwareValue ([string]$board.SerialNumber)}else{''}
+    monitors=$monitors
+    resolution=$resolution
+    mouse_devices=$mouse
+    keyboard_devices=$keyboard
+    agent_version='4.1-powershell'
   }
 }
 
@@ -299,19 +367,36 @@ function Agent-Cycle {
   $cfg=Load-Config
   $manifest=Invoke-AgentApi '/api/agent/manifest/' 'GET'
   Apply-NetworkPolicy $manifest.network_policy
-  $inventory=Get-SoftwareInventory
   $heartbeat=@{
     ip_address=(Get-LocalIp)
     os_version=[string](Get-CimInstance Win32_OperatingSystem).Caption
     serial_number=(Get-SerialNumber)
     system_info=(Get-SystemInfo)
-    apps=(Find-CatalogApps $manifest $inventory)
-    software_inventory=$inventory
     metrics=(Get-Metrics)
     boot_time=(Get-BootIso)
     power_events=(Get-PowerEvents)
   }
+
+  $inventoryDue=$true
+  try {
+    if($cfg.last_inventory_utc) {
+      $last=[datetime]::Parse([string]$cfg.last_inventory_utc).ToUniversalTime()
+      if(((Get-Date).ToUniversalTime()-$last).TotalSeconds -lt 900) { $inventoryDue=$false }
+    }
+  } catch { $inventoryDue=$true }
+
+  if($inventoryDue) {
+    $inventory=Get-SoftwareInventory
+    $heartbeat['apps']=(Find-CatalogApps $manifest $inventory)
+    $heartbeat['software_inventory']=$inventory
+  }
+
   Invoke-AgentApi '/api/agent/heartbeat/' 'POST' $heartbeat | Out-Null
+  if($inventoryDue) {
+    $cfg=Load-Config
+    $cfg | Add-Member -NotePropertyName last_inventory_utc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
+    Save-Config $cfg
+  }
   $dryRun = -not [bool]$manifest.live_actions
   Process-Commands $manifest $dryRun
   Process-AgentTasks $dryRun
@@ -321,6 +406,6 @@ $once = $args -contains '--once'
 do {
   try { Agent-Cycle } catch { Write-AgentLog ("Cycle failed: "+$_.Exception.Message) }
   if ($once) { break }
-  try { $cfg=Load-Config; $seconds=[Math]::Max(10,[Math]::Min(300,[int]$cfg.poll_seconds)) } catch {$seconds=20}
+  try { $cfg=Load-Config; $seconds=[Math]::Max(30,[Math]::Min(300,[int]$cfg.poll_seconds)) } catch {$seconds=60}
   Start-Sleep -Seconds $seconds
 } while ($true)

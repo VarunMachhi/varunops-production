@@ -21,5 +21,9 @@ services:
         sync: false
       - key: ADMIN_EMAIL
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: DEFAULT_FROM_EMAIL
+        sync: false
       - key: DB_CONN_MAX_AGE
         value: "60"

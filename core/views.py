@@ -1,12 +1,21 @@
 import secrets
+import os
+import json
 import uuid
 import re
 import io
 import zipfile
 import logging
+import csv
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
+from django.contrib.auth import update_session_auth_hash
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
+from django.core.mail import send_mail
 from django.contrib.auth.hashers import make_password, check_password
 from django.db import transaction
 from django.db.models import Count, Q, Prefetch
@@ -27,7 +36,7 @@ from .authentication import AgentKeyAuthentication
 from .models import (
     AppCatalog, AuditLog, Command, EmployeeProfile, InstalledApp, Machine, Notification,
     SoftwareRequest, SupportTicket, TicketAttachment, TicketMessage,
-    NetworkPolicy, MachineAppPolicy, UnauthorizedSoftware, DetectedSoftware, DeviceMetric, PowerEvent, DevicePairingCode, AgentTask,
+    NetworkPolicy, MachineAppPolicy, UnauthorizedSoftware, DetectedSoftware, DeviceMetric, PowerEvent, DevicePairingCode, AgentTask, PasswordResetOTP,
 )
 from .serializers import (
     AppCatalogSerializer, AuditLogSerializer, CommandSerializer, EmployeeMachineSerializer,
@@ -91,7 +100,7 @@ def employee_agent_package(request):
         return JsonResponse({"detail": "Staff accounts use the admin console."}, status=403)
     base_url = request.build_absolute_uri("/").rstrip("/")
     agent_dir = settings.BASE_DIR / "agent"
-    files = ["VarunOpsAgent.ps1", "install_agent.ps1"]
+    files = ["VarunOpsAgent.ps1", "install_agent.ps1", "update_agent.ps1"]
     for name in files:
         if not (agent_dir / name).exists():
             return JsonResponse({"detail": f"Agent package is missing {name}."}, status=500)
@@ -123,22 +132,43 @@ echo Setup failed. Check the code and internet connection.
 pause
 exit /b 1
 """.replace("__SERVER__", base_url)
+    update_bat = """@echo off
+setlocal
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+  powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+  exit /b
+)
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0update_agent.ps1"
+if errorlevel 1 (
+  echo.
+  echo Agent update failed.
+  pause
+  exit /b 1
+)
+echo.
+echo Agent updated. Keep the PC online for about a minute.
+pause
+"""
     readme = f"""VarunOps PC Connector
 
+NEW PC
 1. Sign in to {base_url}/employee/
-2. Open My PC and generate a pairing code.
-3. Extract this ZIP on the Windows PC.
-4. Double-click CONNECT_THIS_PC.bat and approve the Administrator prompt.
-5. Enter the 8-digit code.
+2. Generate a pairing code.
+3. Extract this ZIP.
+4. Run CONNECT_THIS_PC.bat as Administrator and enter the code.
+
+EXISTING VARUNOPS PC
+If this PC is already paired but the portal says the first full scan is incomplete, run UPDATE_EXISTING_AGENT.bat as Administrator. It preserves the existing device registration and upgrades the inventory collector.
 
 The first install starts in TEST mode. Software commands remain queued until IT intentionally enables LIVE actions from the Admin device page.
-Website policies and inventory reporting still apply after the agent is paired.
 """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for name in files:
             zf.write(agent_dir / name, arcname=name)
         zf.writestr("CONNECT_THIS_PC.bat", bat)
+        zf.writestr("UPDATE_EXISTING_AGENT.bat", update_bat)
         zf.writestr("README.txt", readme)
     buffer.seek(0)
     response = FileResponse(buffer, as_attachment=True, filename="VarunOps-PC-Connector.zip")
@@ -513,7 +543,7 @@ def agent_heartbeat(request):
     machine.last_seen = timezone.now()
     machine.save(update_fields=["ip_address", "os_version", "serial_number", "system_info", "last_seen"])
 
-    reported = data.get("apps", [])
+    reported = data.get("apps", None)
     if isinstance(reported, list):
         allowed_apps = {a.slug: a for a in AppCatalog.objects.filter(enabled=True)}
         seen = set()
@@ -536,7 +566,7 @@ def agent_heartbeat(request):
 
     # Near-real-time device telemetry. Keep the newest sample directly on the Machine
     # so dashboards remain fast and free-tier databases do not grow every 10 seconds.
-    # A historical snapshot is kept approximately every 5 minutes.
+    # A historical snapshot is kept approximately every 15 minutes; seven days are retained.
     metrics = data.get("metrics", {})
     if isinstance(metrics, dict):
         try:
@@ -556,9 +586,9 @@ def agent_heartbeat(request):
             machine.metrics_updated_at = now
             machine.save(update_fields=["live_metrics", "metrics_updated_at"])
             newest = DeviceMetric.objects.filter(machine=machine).order_by("-recorded_at").only("recorded_at").first()
-            if not newest or (now - newest.recorded_at).total_seconds() >= 300:
+            if not newest or (now - newest.recorded_at).total_seconds() >= 900:
                 DeviceMetric.objects.create(machine=machine, **clean_metrics)
-            DeviceMetric.objects.filter(machine=machine, recorded_at__lt=now-timedelta(hours=48)).delete()
+            DeviceMetric.objects.filter(machine=machine, recorded_at__lt=now-timedelta(days=7)).delete()
         except (TypeError, ValueError):
             pass
 
@@ -583,7 +613,7 @@ def agent_heartbeat(request):
                 )
 
     # Persist the complete reported software inventory and classify it against this PC's policy.
-    inventory = data.get("software_inventory", [])
+    inventory = data.get("software_inventory", None)
     if isinstance(inventory, list):
         policies = {p.app_id: p for p in MachineAppPolicy.objects.filter(machine=machine).select_related("app")}
         catalog = list(AppCatalog.objects.filter(enabled=True))
@@ -858,9 +888,22 @@ def employee_bootstrap(request):
         "machine", "assigned_to"
     ).prefetch_related("messages__author", Prefetch("messages__attachment", queryset=TicketAttachment.objects.only("id", "message_id", "original_name", "content_type", "size")))[:100]
     notifications = Notification.objects.filter(user=request.user)[:100]
+    agent_version = str((machine.system_info or {}).get("agent_version", "")) if machine else ""
+    machine_ready = bool(
+        machine and machine.online and machine.system_info and machine.metrics_updated_at
+        and agent_version.startswith("4.1")
+        and (machine.system_info or {}).get("cpu_name")
+        and (machine.system_info or {}).get("memory_modules") is not None
+    )
     return Response({
         "profile": EmployeeProfileSerializer(profile).data,
         "machine": EmployeeMachineSerializer(machine).data if machine else None,
+        "onboarding": {
+            "state": profile.onboarding_state,
+            "machine_ready": machine_ready,
+            "email_ready": bool((request.user.email or "").strip()),
+            "masked_email": _mask_email(request.user.email or ""),
+        },
         "apps": _employee_store_apps(machine),
         "software_requests": SoftwareRequestSerializer(software_requests, many=True).data,
         "tickets": SupportTicketSerializer(tickets, many=True).data,
@@ -875,6 +918,8 @@ def employee_request_software(request):
     if request.user.is_staff:
         return Response({"detail": "Use the admin console."}, status=403)
     profile = employee_profile_for(request.user)
+    if profile.onboarding_state != EmployeeProfile.ONBOARD_ACTIVE:
+        return Response({"detail": "Complete PC connection and email verification before using company software requests."}, status=403)
     if not profile.assigned_machine_id:
         return Response({"detail": "No managed computer is assigned to your employee account."}, status=409)
     app_slug = str(request.data.get("app_slug", "")).strip()[:64]
@@ -927,6 +972,9 @@ def employee_request_software(request):
 def employee_cancel_software_request(request, request_id):
     if request.user.is_staff:
         return Response({"detail": "Use the admin console."}, status=403)
+    profile = employee_profile_for(request.user)
+    if profile.onboarding_state != EmployeeProfile.ONBOARD_ACTIVE:
+        return Response({"detail": "Complete onboarding first."}, status=403)
     try:
         item = SoftwareRequest.objects.get(pk=request_id, employee=request.user, status=SoftwareRequest.STATUS_SUBMITTED)
     except (SoftwareRequest.DoesNotExist, ValueError):
@@ -1031,6 +1079,8 @@ def employee_create_ticket(request):
     if request.user.is_staff:
         return Response({"detail": "Use the admin console."}, status=403)
     profile = employee_profile_for(request.user)
+    if profile.onboarding_state != EmployeeProfile.ONBOARD_ACTIVE:
+        return Response({"detail": "Complete onboarding before opening IT tickets."}, status=403)
     category = str(request.data.get("category", "")).strip().lower()
     priority = str(request.data.get("priority", "medium")).strip().lower()
     subject = str(request.data.get("subject", "")).strip()[:180]
@@ -1094,6 +1144,8 @@ def ticket_add_message(request, ticket_id):
         return Response({"detail": "Ticket not found."}, status=404)
     if not request.user.is_staff and ticket.employee_id != request.user.id:
         return Response({"detail": "You do not have access to this ticket."}, status=403)
+    if not request.user.is_staff and employee_profile_for(request.user).onboarding_state != EmployeeProfile.ONBOARD_ACTIVE:
+        return Response({"detail": "Complete onboarding first."}, status=403)
     body = str(request.data.get("body", "")).strip()[:4000]
     upload = request.FILES.get("attachment")
     try:
@@ -1441,7 +1493,9 @@ def agent_enroll_with_pairing(request):
     profile.assigned_machine = machine
     if not profile.branch:
         profile.branch = machine.branch
-    profile.save(update_fields=["assigned_machine", "branch", "updated_at"])
+    if profile.onboarding_state != EmployeeProfile.ONBOARD_ACTIVE:
+        profile.onboarding_state = EmployeeProfile.ONBOARD_VERIFY_EMAIL
+    profile.save(update_fields=["assigned_machine", "branch", "onboarding_state", "updated_at"])
     match.used_at = timezone.now()
     match.save(update_fields=["used_at"])
     notify_user(match.user, "Device registered", f"{machine.name} is now connected to your VarunOps account.", "success", "/employee/#device")
@@ -1464,6 +1518,8 @@ def admin_create_employee(request):
     job_title = str(request.data.get("job_title", "")).strip()[:100]
     if not re.fullmatch(r"[a-z0-9._-]{3,150}", username):
         return Response({"detail": "Username must be at least 3 characters and use letters, numbers, dot, underscore or hyphen."}, status=400)
+    if not email or "@" not in email:
+        return Response({"detail": "A valid employee email is required for OTP verification and password setup."}, status=400)
     User = get_user_model()
     if User.objects.filter(username=username).exists():
         return Response({"detail": "That username already exists."}, status=409)
@@ -1471,7 +1527,10 @@ def admin_create_employee(request):
         return Response({"detail": "That employee code already exists."}, status=409)
     password = secrets.token_urlsafe(12)
     user = User.objects.create_user(username=username, password=password, email=email, first_name=first_name, last_name=last_name)
-    profile = EmployeeProfile.objects.create(user=user, employee_code=employee_code or None, department=department, branch=branch, job_title=job_title)
+    profile = EmployeeProfile.objects.create(
+        user=user, employee_code=employee_code or None, department=department, branch=branch, job_title=job_title,
+        onboarding_state=EmployeeProfile.ONBOARD_PAIR_DEVICE, temporary_password_issued_at=timezone.now(),
+    )
     audit(request, "employee.create", f"Created employee account {username}", "success", metadata={"employee_code": employee_code})
     return Response({"profile": EmployeeProfileSerializer(profile).data, "temporary_password": password}, status=201)
 
@@ -1621,6 +1680,373 @@ def admin_catalog_save(request):
     return Response(AppCatalogSerializer(app).data, status=201 if created else 200)
 
 
+def _employee_asset_payload(data):
+    allowed = [
+        "asset_tag", "pin_number", "vendor", "purchase_date", "desk_location",
+        "monitor_brand", "monitor_model", "monitor_serial", "screen_size",
+        "mouse_brand", "mouse_model", "mouse_serial",
+        "keyboard_brand", "keyboard_model", "keyboard_serial",
+        "ups_brand", "ups_model", "ups_serial", "notes",
+    ]
+    out = {}
+    for key in allowed:
+        value = str(data.get(key, "")).strip()
+        out[key] = value[:500 if key == "notes" else 160]
+    return out
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def employee_save_asset_details(request):
+    if request.user.is_staff:
+        return Response({"detail": "Use the admin console."}, status=403)
+    profile = employee_profile_for(request.user)
+    if not profile.assigned_machine_id:
+        return Response({"detail": "Connect your company PC first."}, status=409)
+    details = _employee_asset_payload(request.data if isinstance(request.data, dict) else {})
+    machine = profile.assigned_machine
+    merged = dict(machine.asset_details or {})
+    merged.update(details)
+    machine.asset_details = merged
+    machine.save(update_fields=["asset_details"])
+    profile.asset_details = merged
+    profile.save(update_fields=["asset_details", "updated_at"])
+    audit(request, "employee.asset_details", f"{request.user.username} updated manual asset details", "info", machine=machine)
+    return Response({"ok": True, "asset_details": merged})
+
+
+def _send_transactional_email(recipient, subject, message):
+    """Send via Resend HTTPS API on cloud free tiers; fall back to Django email locally/elsewhere."""
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    if api_key:
+        payload = json.dumps({
+            "from": settings.DEFAULT_FROM_EMAIL,
+            "to": [recipient],
+            "subject": subject,
+            "text": message,
+        }).encode("utf-8")
+        req = Request(
+            "https://api.resend.com/emails",
+            data=payload,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "VarunOps/1.0",
+            },
+        )
+        try:
+            with urlopen(req, timeout=20) as response:
+                if response.status < 200 or response.status >= 300:
+                    raise RuntimeError(f"Resend returned HTTP {response.status}")
+                return True
+        except HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read(1000).decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            raise RuntimeError(f"Resend HTTP {exc.code}: {detail[:500]}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Resend connection failed: {exc.reason}") from exc
+    send_mail(
+        subject=subject,
+        message=message,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=[recipient],
+        fail_silently=False,
+    )
+    return True
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def employee_request_password_otp(request):
+    if request.user.is_staff:
+        return Response({"detail": "Staff accounts use the admin console."}, status=403)
+    profile = employee_profile_for(request.user)
+    if not profile.assigned_machine_id:
+        return Response({"detail": "Connect your company PC before setting your permanent password."}, status=409)
+    machine = profile.assigned_machine
+    if not machine.online or not machine.system_info or not machine.metrics_updated_at:
+        return Response({"detail": "PC is paired but the first inventory/telemetry sync is not complete yet. Keep the PC online for about a minute and retry."}, status=409)
+    if profile.onboarding_state == EmployeeProfile.ONBOARD_ACTIVE:
+        # The same flow is also safe for future password resets.
+        pass
+    email = (request.user.email or "").strip()
+    if not email or "@" not in email:
+        return Response({"detail": "Your employee account has no valid email. Ask IT to update it."}, status=409)
+    now = timezone.now()
+    newest = PasswordResetOTP.objects.filter(user=request.user).order_by("-created_at").first()
+    if newest and (now - newest.created_at).total_seconds() < 60:
+        return Response({"detail": "Please wait 60 seconds before requesting another OTP."}, status=429)
+    recent_count = PasswordResetOTP.objects.filter(user=request.user, created_at__gte=now-timedelta(hours=1)).count()
+    if recent_count >= 5:
+        return Response({"detail": "Too many OTP requests. Try again later or contact IT."}, status=429)
+    PasswordResetOTP.objects.filter(user=request.user, used_at__isnull=True).update(used_at=now)
+    code = f"{secrets.randbelow(1000000):06d}"
+    otp = PasswordResetOTP.objects.create(
+        user=request.user,
+        code_hash=make_password(code),
+        expires_at=timezone.now() + timedelta(minutes=10),
+    )
+    try:
+        _send_transactional_email(
+            email,
+            "VarunOps verification code",
+            f"Your VarunOps verification code is {code}. It expires in 10 minutes. If you did not request this, contact IT.",
+        )
+    except Exception as exc:
+        otp.delete()
+        logger.exception("OTP email failed")
+        return Response({"detail": "OTP email could not be sent. IT should verify the SMTP/Resend settings."}, status=502)
+    audit(request, "employee.otp_sent", f"Password verification OTP sent for {request.user.username}", "info", machine=profile.assigned_machine)
+    payload = {"ok": True, "masked_email": _mask_email(email), "expires_in_seconds": 600}
+    if settings.DEBUG and settings.EMAIL_BACKEND.endswith("console.EmailBackend"):
+        payload["development_otp"] = code
+    return Response(payload)
+
+
+def _mask_email(email):
+    try:
+        local, domain = email.split("@", 1)
+        show = local[:2] if len(local) > 2 else local[:1]
+        return show + "***@" + domain
+    except ValueError:
+        return "configured email"
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def employee_complete_password_reset(request):
+    if request.user.is_staff:
+        return Response({"detail": "Staff accounts use the admin console."}, status=403)
+    profile = employee_profile_for(request.user)
+    if not profile.assigned_machine_id:
+        return Response({"detail": "Connect your company PC first."}, status=409)
+    code = str(request.data.get("otp", "")).strip()
+    new_password = str(request.data.get("new_password", ""))
+    confirm_password = str(request.data.get("confirm_password", ""))
+    if not re.fullmatch(r"\d{6}", code):
+        return Response({"detail": "Enter the 6-digit OTP."}, status=400)
+    if new_password != confirm_password:
+        return Response({"detail": "Passwords do not match."}, status=400)
+    candidates = PasswordResetOTP.objects.filter(
+        user=request.user, used_at__isnull=True, expires_at__gt=timezone.now()
+    ).order_by("-created_at")[:5]
+    otp = None
+    for candidate in candidates:
+        if candidate.attempts >= 5:
+            continue
+        if check_password(code, candidate.code_hash):
+            otp = candidate
+            break
+        candidate.attempts += 1
+        candidate.save(update_fields=["attempts"])
+    if not otp:
+        return Response({"detail": "OTP is invalid or expired."}, status=400)
+    try:
+        validate_password(new_password, user=request.user)
+    except ValidationError as exc:
+        return Response({"detail": " ".join(exc.messages)}, status=400)
+    request.user.set_password(new_password)
+    request.user.save(update_fields=["password"])
+    update_session_auth_hash(request, request.user)
+    now = timezone.now()
+    otp.used_at = now
+    otp.save(update_fields=["used_at"])
+    PasswordResetOTP.objects.filter(user=request.user, used_at__isnull=True).update(used_at=now)
+    profile.onboarding_state = EmployeeProfile.ONBOARD_ACTIVE
+    profile.email_verified_at = now
+    profile.password_changed_at = now
+    profile.save(update_fields=["onboarding_state", "email_verified_at", "password_changed_at", "updated_at"])
+    notify_user(request.user, "Setup complete", "Your email is verified and your permanent VarunOps password is active.", "success", "/employee/")
+    audit(request, "employee.password_set", f"{request.user.username} completed secure onboarding", "success", machine=profile.assigned_machine)
+    return Response({"ok": True, "onboarding_state": profile.onboarding_state})
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAdminUser])
+def admin_update_employee(request, username):
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    try:
+        user = User.objects.select_related("employee_profile").get(username=username, is_staff=False)
+    except User.DoesNotExist:
+        return Response({"detail": "Employee not found."}, status=404)
+    profile, _ = EmployeeProfile.objects.get_or_create(user=user)
+    email = str(request.data.get("email", user.email or "")).strip()[:254]
+    employee_code = str(request.data.get("employee_code", profile.employee_code or "")).strip()[:40]
+    if not email or "@" not in email:
+        return Response({"detail": "A valid employee email is required for OTP verification."}, status=400)
+    if employee_code and EmployeeProfile.objects.filter(employee_code=employee_code).exclude(pk=profile.pk).exists():
+        return Response({"detail": "That employee code already exists."}, status=409)
+    old_email = user.email
+    user.first_name = str(request.data.get("first_name", user.first_name)).strip()[:80]
+    user.last_name = str(request.data.get("last_name", user.last_name)).strip()[:80]
+    user.email = email
+    user.save(update_fields=["first_name", "last_name", "email"])
+    profile.employee_code = employee_code or None
+    profile.department = str(request.data.get("department", profile.department)).strip()[:100]
+    profile.branch = str(request.data.get("branch", profile.branch)).strip()[:120]
+    profile.job_title = str(request.data.get("job_title", profile.job_title)).strip()[:100]
+    profile.phone = str(request.data.get("phone", profile.phone)).strip()[:30]
+    if old_email.casefold() != email.casefold():
+        profile.email_verified_at = None
+    profile.save(update_fields=["employee_code", "department", "branch", "job_title", "phone", "email_verified_at", "updated_at"])
+    audit(request, "employee.update", f"Updated employee account {username}", "info", machine=profile.assigned_machine, metadata={"email_changed": old_email.casefold() != email.casefold()})
+    return Response(EmployeeProfileSerializer(profile).data)
+
+
+def _first(sequence):
+    return sequence[0] if isinstance(sequence, list) and sequence else {}
+
+
+def _fmt_dt(value):
+    return value.astimezone().strftime("%Y-%m-%d %H:%M:%S") if value else ""
+
+
+@api_view(["GET"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAdminUser])
+def admin_export_asset_csv(request):
+    """Export a compact asset register compatible with the user's existing inventory columns."""
+    response = HttpResponse(content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = 'attachment; filename="VarunOps_Asset_Inventory.csv"'
+    response.write("\ufeff")
+    writer = csv.writer(response)
+    columns = [
+        "Hostname", "Employee", "Designation", "Branch", "Device Type", "Status", "Last Seen", "Last Sync",
+        "IP Address", "MAC Address", "OS", "System Brand", "System Model", "CPU", "CPU Serial",
+        "CPU Manufacturer", "Cores", "Threads", "Clock Speed", "Architecture", "Motherboard", "Motherboard Serial",
+        "BIOS Serial", "RAM Total", "RAM Modules", "Storage", "Monitor Brand", "Monitor", "Monitor Serial",
+        "Screen Size", "Resolution", "Monitor Mfg Date", "Mouse Brand", "Mouse", "Keyboard Brand", "Keyboard",
+        "UPS", "Asset Tag", "Vendor", "Purchase Date", "Registered", "Active",
+    ]
+    writer.writerow(columns)
+    profiles = {p.assigned_machine_id: p for p in EmployeeProfile.objects.select_related("user").exclude(assigned_machine_id__isnull=True)}
+    for m in Machine.objects.all().order_by("name"):
+        info = m.system_info or {}
+        asset = m.asset_details or {}
+        profile = profiles.get(m.id)
+        user = profile.user if profile else None
+        net = _first(info.get("network_adapters"))
+        monitor = _first(info.get("monitors"))
+        mouse = _first(info.get("mouse_devices"))
+        keyboard = _first(info.get("keyboard_devices"))
+        ram_modules = info.get("memory_modules") or []
+        disks = info.get("physical_disks") or []
+        ram_text = " | ".join(
+            f"{r.get('capacity_gb','?')}GB {r.get('manufacturer','')} {r.get('part_number','')} SN:{r.get('serial','')}".strip()
+            for r in ram_modules
+        )
+        disk_text = " | ".join(
+            f"{d.get('model','Disk')} {d.get('size_gb','')}GB SN:{d.get('serial','')} {d.get('media_type','')}".strip()
+            for d in disks
+        )
+        monitor_brand = asset.get("monitor_brand") or monitor.get("manufacturer") or monitor.get("manufacturer_code") or ""
+        monitor_model = asset.get("monitor_model") or monitor.get("model") or ""
+        monitor_serial = asset.get("monitor_serial") or monitor.get("serial") or ""
+        screen_size = asset.get("screen_size") or (f"{monitor.get('diagonal_inches')} inch" if monitor.get("diagonal_inches") else "")
+        mfg = ""
+        if monitor.get("mfg_year"):
+            mfg = str(monitor.get("mfg_year"))
+            if monitor.get("mfg_week"):
+                mfg += f" W{monitor.get('mfg_week')}"
+        writer.writerow([
+            m.name,
+            (user.get_full_name() or user.username) if user else "",
+            profile.job_title if profile else "",
+            m.branch or (profile.branch if profile else ""),
+            m.device_type,
+            "Online" if m.online else "Offline",
+            _fmt_dt(m.last_seen),
+            _fmt_dt(m.metrics_updated_at),
+            m.ip_address or "",
+            net.get("mac") or net.get("mac_address") or "",
+            info.get("os_caption") or m.os_version or "",
+            info.get("manufacturer") or "",
+            info.get("model") or "",
+            info.get("cpu_name") or info.get("processor") or "",
+            info.get("cpu_id") or "",
+            info.get("cpu_manufacturer") or "",
+            info.get("cpu_cores") or "",
+            info.get("cpu_logical_processors") or "",
+            (str(info.get("cpu_max_clock_mhz")) + " MHz") if info.get("cpu_max_clock_mhz") else "",
+            info.get("os_architecture") or info.get("architecture") or "",
+            " ".join(x for x in [info.get("motherboard_manufacturer"), info.get("motherboard_model")] if x),
+            info.get("motherboard_serial") or "",
+            info.get("bios_serial") or m.serial_number or "",
+            (str(info.get("memory_total_gb")) + " GB") if info.get("memory_total_gb") else "",
+            ram_text,
+            disk_text,
+            monitor_brand,
+            monitor_model,
+            monitor_serial,
+            screen_size,
+            info.get("resolution") or "",
+            mfg,
+            asset.get("mouse_brand") or mouse.get("manufacturer") or "",
+            asset.get("mouse_model") or mouse.get("name") or "",
+            asset.get("keyboard_brand") or keyboard.get("manufacturer") or "",
+            asset.get("keyboard_model") or keyboard.get("name") or keyboard.get("description") or "",
+            " ".join(x for x in [asset.get("ups_brand"), asset.get("ups_model"), asset.get("ups_serial")] if x),
+            asset.get("asset_tag") or "",
+            asset.get("vendor") or "",
+            asset.get("purchase_date") or "",
+            _fmt_dt(m.enrolled_at),
+            "Yes" if m.enabled else "No",
+        ])
+    audit(request, "assets.export", "Exported asset inventory CSV", "info", metadata={"device_count": Machine.objects.count()})
+    return response
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAdminUser])
+def admin_reissue_temp_password(request, username):
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    try:
+        user = User.objects.get(username=username, is_staff=False)
+    except User.DoesNotExist:
+        return Response({"detail": "Employee not found."}, status=404)
+    profile, _ = EmployeeProfile.objects.get_or_create(user=user)
+    password = secrets.token_urlsafe(12)
+    user.set_password(password)
+    user.save(update_fields=["password"])
+    profile.temporary_password_issued_at = timezone.now()
+    profile.onboarding_state = EmployeeProfile.ONBOARD_VERIFY_EMAIL if profile.assigned_machine_id else EmployeeProfile.ONBOARD_PAIR_DEVICE
+    profile.save(update_fields=["temporary_password_issued_at", "onboarding_state", "updated_at"])
+    audit(request, "employee.temp_password_reissued", f"Reissued temporary password for {username}", "warning", machine=profile.assigned_machine)
+    return Response({"username": username, "temporary_password": password, "onboarding_state": profile.onboarding_state})
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAdminUser])
+def admin_machine_asset_details(request):
+    machine_id = str(request.data.get("machine_id", "")).strip()
+    try:
+        machine = Machine.objects.get(pk=machine_id)
+    except (Machine.DoesNotExist, ValueError):
+        return Response({"detail": "Device not found."}, status=404)
+    merged = dict(machine.asset_details or {})
+    merged.update(_employee_asset_payload(request.data if isinstance(request.data, dict) else {}))
+    machine.asset_details = merged
+    machine.save(update_fields=["asset_details"])
+    profile = EmployeeProfile.objects.filter(assigned_machine=machine).first()
+    if profile:
+        profile.asset_details = merged
+        profile.save(update_fields=["asset_details", "updated_at"])
+    audit(request, "device.asset_details", f"IT updated asset details for {machine.name}", "info", machine=machine)
+    return Response({"ok": True, "asset_details": merged})
+
+
 @api_view(["POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAuthenticated])
@@ -1628,21 +2054,12 @@ def employee_update_profile(request):
     if request.user.is_staff:
         return Response({"detail": "Staff accounts use the admin console."}, status=403)
     profile = employee_profile_for(request.user)
-    first_name = str(request.data.get("first_name", request.user.first_name)).strip()[:80]
-    last_name = str(request.data.get("last_name", request.user.last_name)).strip()[:80]
-    email = str(request.data.get("email", request.user.email)).strip()[:254]
-    employee_code = str(request.data.get("employee_code", profile.employee_code or "")).strip()[:40]
-    if employee_code and EmployeeProfile.objects.exclude(pk=profile.pk).filter(employee_code=employee_code).exists():
-        return Response({"detail": "That employee code is already in use."}, status=409)
-    request.user.first_name = first_name
-    request.user.last_name = last_name
-    request.user.email = email
-    request.user.save(update_fields=["first_name", "last_name", "email"])
-    profile.employee_code = employee_code or None
-    profile.job_title = str(request.data.get("job_title", profile.job_title)).strip()[:100]
-    profile.department = str(request.data.get("department", profile.department)).strip()[:100]
-    profile.branch = str(request.data.get("branch", profile.branch)).strip()[:120]
+    if profile.onboarding_state != EmployeeProfile.ONBOARD_ACTIVE:
+        return Response({"detail": "Complete onboarding first."}, status=403)
+    request.user.first_name = str(request.data.get("first_name", request.user.first_name)).strip()[:80]
+    request.user.last_name = str(request.data.get("last_name", request.user.last_name)).strip()[:80]
+    request.user.save(update_fields=["first_name", "last_name"])
     profile.phone = str(request.data.get("phone", profile.phone)).strip()[:30]
-    profile.save(update_fields=["employee_code", "job_title", "department", "branch", "phone", "updated_at"])
-    audit(request, "employee.profile_update", f"{request.user.username} updated employee profile", "info", machine=profile.assigned_machine)
+    profile.save(update_fields=["phone", "updated_at"])
+    audit(request, "employee.profile_update", f"{request.user.username} updated contact profile", "info", machine=profile.assigned_machine)
     return Response(EmployeeProfileSerializer(profile).data)

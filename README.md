@@ -1,146 +1,71 @@
-# VarunOps Pro — Real Deploy Build
+# VarunOps Pro — Employee Onboarding + 60 Device Build
 
-VarunOps is a Django + Windows-agent endpoint-management prototype for company PCs.
+VarunOps is a Django + Windows PowerShell-agent endpoint-management prototype for company PCs.
 
-## Start locally
+## Employee onboarding
 
-On Windows, extract the complete ZIP and double-click:
+1. IT creates employee with username, IT-managed email, employee code/department/branch/title.
+2. VarunOps shows a strong temporary password **once**. IT gives it privately to the employee.
+3. Employee signs in. Normal portal navigation remains locked during onboarding.
+4. Employee generates a single-use 8-digit pairing code and downloads the PC Connector.
+5. On the company Windows PC, run `CONNECT_THIS_PC.bat` as Administrator and enter the code.
+6. The agent enrolls with a unique device credential and sends its first full hardware + live-usage report.
+7. Only after the first real report is received, Employee can request a 6-digit OTP sent to the email stored by IT.
+8. Employee verifies OTP and creates a permanent password. The password is hashed by Django and **is never visible to IT**.
+9. Dashboard unlocks.
 
-`START_VARUNOPS.bat`
+Admin sees onboarding/password **status** and timestamps (temporary password issued, email verified, permanent password changed), never the permanent password.
 
-First setup creates the virtual environment, installs requirements, runs migrations, seeds local demo data, checks Django, starts the server, and opens `http://127.0.0.1:8000/`.
+## Automatic device inventory
 
-Local demo accounts:
-- Admin: `admin` / `ChangeThisImmediately!234`
-- Employee: `varun` / `EmployeeDemo!234`
+The Windows agent attempts to collect:
+- hostname, IP, MAC/network adapters, signed-in Windows user
+- Windows edition/version/build/architecture
+- system manufacturer/model/type and usable system serial
+- CPU name, Processor ID, manufacturer, cores, logical processors, max clock
+- motherboard manufacturer/model/serial, BIOS version/serial
+- RAM total and individual RAM module capacity/manufacturer/part/serial/speed
+- physical disks model/serial/size/interface/media type
+- GPU
+- monitor manufacturer/model/serial, size, resolution and EDID manufacture week/year when Windows exposes it
+- mouse and keyboard name/manufacturer/PNP ID when Windows exposes it
+- CPU/RAM/storage usage, volumes, uptime
+- installed software inventory and Windows power events
 
-Change these before real use. The demo employee starts **unpaired** so you can test the real PC pairing flow.
+Hardware firmware/drivers do not reliably expose every peripheral value. VarunOps therefore provides manual asset fields for Asset Tag/PIN, vendor, purchase date, desk/location, monitor overrides, mouse/keyboard serial/model, UPS details and notes.
 
-## Clean navigation
+Admin > Devices includes **Export asset CSV** compatible with the asset-register fields used for this build.
 
-### Admin
-Overview → Devices → Employees → Software → Requests → Policies → Support → Activity
+## 60+ employee/device optimization
 
-### Employee
-Home → My PC → Software → Support → Notifications → Profile
+- endpoint heartbeat/live metrics: about **60 seconds**
+- installed-software inventory: about **15 minutes**
+- latest telemetry is overwritten on the Machine row (no new DB row every minute)
+- sampled metric history: one snapshot about every **15 minutes**, rolling **7 days**
+- detected software uses update-or-create rather than append-only history
 
-## Employee + PC workflow
+This substantially reduces free-database writes compared with 15-second full inventory polling.
 
-1. Admin creates an employee account.
-2. Employee signs in and completes Profile.
-3. Employee opens My PC and generates a single-use 8-digit pairing code.
-4. Employee downloads the PC Connector ZIP.
-5. On that Windows PC, extract it and run `CONNECT_THIS_PC.bat` as Administrator.
-6. The installed SYSTEM agent sends hardware, software inventory, CPU/RAM/storage telemetry, IP/Windows data, last-seen, and power events.
-7. The employee can only see their assigned PC and software IT has allowed for that PC.
+## Software control
 
-## Software policies per PC
+Per PC an app can be Required / Optional / Blocked. Employee only sees apps allowed for that PC. Employee requests install/update/uninstall; IT approval creates a typed endpoint command. Unknown installed software creates a device warning; IT can allow that exact name on that PC or queue a removal attempt.
 
-IT can mark each catalog app:
-- **Required** — must be installed; Enforce mode queues installation if missing.
-- **Optional** — visible in that employee's company Software page; employee can request install/update/uninstall.
-- **Blocked** — cannot be requested; Enforce mode can remove a blocked catalog app.
+App sources are either:
+- Winget package ID (recommended), or
+- trusted HTTPS EXE/MSI + exact SHA-256 + bounded silent arguments.
 
-Once a PC has explicit app-policy rows, its Employee Software page becomes an explicit per-PC allowlist.
+Cracks, activation bypasses and arbitrary remote PowerShell/CMD are intentionally unsupported.
 
-## Unauthorized software
+## Website restriction
 
-The agent inventories Windows installed software. Items that are not:
-- an approved catalog app,
-- a per-PC exception, or
-- a conservative Windows/runtime baseline
+Per-PC policies write managed Edge/Chrome URL allow/block policy. For true every-app/every-browser filtering, add a DNS/Secure Web Gateway; browser policy alone is not a full network firewall.
 
-are reported as unapproved software. IT receives an alert and can:
-- **Allow on this PC** (creates a per-PC exception), or
-- **Uninstall** (queues a validated endpoint removal task).
+## Local start
 
-VarunOps reports that software was **detected on a device**. Inventory data alone cannot reliably prove which human installed it.
+Extract and run `START_VARUNOPS.bat`.
 
-## Software Store — real installer source
+## Cloud deployment
 
-VarunOps does not pretend an EXE appears by itself. Every app has a deployment source.
+Read `DEPLOY_FREE.md`. The build supports any PostgreSQL `DATABASE_URL`. For a free test deployment with many continuously-reporting endpoints, Supabase Free PostgreSQL is a practical option; Render hosts Django and Resend HTTPS API sends OTP email (Render Free blocks outbound SMTP ports).
 
-### Winget (recommended)
-Set a Winget package ID, e.g. `Google.Chrome`. The Windows agent uses the exact package ID for supported actions.
-
-### Direct HTTPS EXE/MSI
-Set:
-- trusted HTTPS installer URL,
-- EXE/MSI type,
-- exact SHA-256 checksum,
-- silent install/update arguments,
-- detection names.
-
-The agent downloads to a temporary file and verifies SHA-256 before execution. A mismatch is refused.
-
-Direct uninstall currently requires a Winget ID. Arbitrary remote CMD/PowerShell and crack/license-bypass scripts are intentionally unsupported.
-
-## Safe test → live workflow
-
-A newly paired PC starts in **TEST** mode. Inventory, telemetry and browser policy still report/apply, but software/endpoint removal commands stay queued on the server.
-
-After verifying the correct PC/policies:
-Admin → Devices → Details → **Enable LIVE actions**.
-
-Only then can queued install/update/uninstall/removal actions be dispatched to that endpoint.
-
-## Website restrictions
-
-Network policies can be assigned per PC:
-- **Allowlist** — block all URLs in managed browser policy then allow selected patterns.
-- **Blocklist** — allow normal browsing but block selected patterns.
-
-Current agent writes managed policies for Microsoft Edge and Google Chrome. This is browser policy, not a fake claim of all-app network filtering. For every browser/application, add a DNS/Secure Web Gateway later.
-
-## Telemetry
-
-The agent polls about every 15 seconds and sends:
-- CPU %
-- RAM used/total/%
-- storage used/total/% and volumes
-- uptime
-- machine/OS/CPU/model/serial/IP
-- signed-in Windows user when available
-- installed software
-- startup/shutdown/unexpected-shutdown events
-
-The server stores the latest metrics directly on the device plus historical samples approximately every 5 minutes, with a short rolling metrics history to protect a small free database.
-
-## Support
-
-Employees can open IT tickets and reply with optional PNG/JPEG/WebP screenshots (max 2 MB). New screenshots are stored as authenticated database blobs, not public media URLs, so they survive stateless web-service restarts when PostgreSQL is used.
-
-## Production deployment
-
-Read `DEPLOY_FREE.md` for Render + Neon deployment.
-
-Recommended real-test stack:
-- Render Free Web Service
-- Neon Free PostgreSQL
-- Windows PowerShell agent
-
-Free hosting is not guaranteed forever and Render Free is not an always-on production SLA. Use it to prove the workflow; move to paid infrastructure if company downtime matters.
-
-## Key files
-
-- `START_VARUNOPS.bat` — one-click local start
-- `setup_local.ps1` — first-run setup
-- `render.yaml` — Render deployment definition
-- `DEPLOY_FREE.md` — step-by-step cloud deployment
-- `SECURITY.md` — security design and limitations
-- `agent/VarunOpsAgent.ps1` — endpoint agent
-- `agent/install_agent.ps1` — SYSTEM scheduled-task installer
-
-## Verification performed in this package
-
-- Python source compilation checks
-- JavaScript syntax checks
-- archive integrity check
-- route/template/static-file consistency checks
-- scans for dangerous shortcuts such as `csrf_exempt`, `eval`, `exec`, `os.system`, and executable `shell=True`
-
-A full Django runtime integration test could not be executed in the build container because its network cannot download PyPI dependencies. The Windows launcher installs those dependencies on the target PC before migrations/startup.
-
-
-### Render generated secrets
-`render.yaml` uses `generateValue: true` for `SECRET_KEY` and `AGENT_ENROLLMENT_TOKEN`. Render generates a random Base64-encoded 256-bit value (typically 44 characters), which this build accepts as a strong production secret. Do not replace it with a short human password.
+Free tiers are not lifetime guarantees and should not be treated as a production SLA.

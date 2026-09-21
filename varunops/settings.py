@@ -129,6 +129,21 @@ SECURE_HSTS_PRELOAD = env_bool("SECURE_HSTS_PRELOAD", False)
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
+
+# Transactional email / OTP. For production, configure Resend (or any SMTP provider) with env vars.
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND",
+    "django.core.mail.backends.smtp.EmailBackend" if os.getenv("SMTP_PASSWORD") else "django.core.mail.backends.console.EmailBackend",
+)
+EMAIL_HOST = os.getenv("SMTP_HOST", "smtp.resend.com")
+EMAIL_PORT = int(os.getenv("SMTP_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("SMTP_USERNAME", "resend")
+EMAIL_HOST_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+EMAIL_USE_TLS = env_bool("SMTP_USE_TLS", True)
+EMAIL_USE_SSL = env_bool("SMTP_USE_SSL", False)
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "VarunOps <onboarding@resend.dev>")
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "20"))
+
 AGENT_ENROLLMENT_TOKEN = os.getenv("AGENT_ENROLLMENT_TOKEN", "")
 if not DEBUG and len(AGENT_ENROLLMENT_TOKEN) < 32:
     raise RuntimeError("AGENT_ENROLLMENT_TOKEN must be at least 32 characters in production.")
