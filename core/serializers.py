@@ -9,7 +9,7 @@ from .models import (
 class AppCatalogSerializer(serializers.ModelSerializer):
     class Meta:
         model = AppCatalog
-        fields = ["slug", "name", "latest_version", "winget_id", "source_type", "installer_url", "installer_sha256", "installer_kind", "github_repo", "github_asset_name", "github_release_tag", "install_args", "update_args", "homepage_url", "icon_url", "publisher", "description", "category", "employee_visible", "license_required", "license_notes", "update_notes"]
+        fields = ["slug", "name", "latest_version", "winget_id", "source_type", "installer_url", "installer_sha256", "installer_kind", "github_repo", "github_asset_name", "github_release_tag", "install_args", "update_args", "homepage_url", "icon_url", "publisher", "description", "category", "detection_names", "employee_visible", "license_required", "license_notes", "update_notes"]
 
 
 class InstalledAppSerializer(serializers.ModelSerializer):

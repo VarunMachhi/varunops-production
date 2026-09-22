@@ -1,2 +1,2 @@
-VarunOps EnterpriseUX 4.3.0
-Features: strict browsing lock, GitHub Releases software source, bulk approvals, paginated device detail tabs.
+VarunOps Pro EnterpriseUX FIXBUTTONS
+Device modal tabs + Add/Edit Software restored
