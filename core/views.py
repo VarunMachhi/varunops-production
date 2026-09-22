@@ -102,7 +102,7 @@ def employee_agent_package(request):
         return JsonResponse({"detail": "Staff accounts use the admin console."}, status=403)
     base_url = request.build_absolute_uri("/").rstrip("/")
     agent_dir = settings.BASE_DIR / "agent"
-    files = ["VarunOpsAgent.ps1", "install_agent.ps1", "update_agent.ps1", "CHECK_AGENT.bat"]
+    files = ["VarunOpsAgent.ps1", "install_agent.ps1", "update_agent.ps1", "CHECK_AGENT.bat", "CHECK_WEB_POLICY.bat"]
     for name in files:
         if not (agent_dir / name).exists():
             return JsonResponse({"detail": f"Agent package is missing {name}."}, status=500)
@@ -754,7 +754,7 @@ def agent_heartbeat(request):
     system_info_received = bool(machine.system_info)
     metrics_received = bool(machine.metrics_updated_at and machine.live_metrics)
     agent_version = str((machine.system_info or {}).get("agent_version", ""))
-    machine_ready = bool(system_info_received and metrics_received and agent_version.startswith("4.2"))
+    machine_ready = bool(system_info_received and metrics_received and agent_version.startswith("4."))
     return Response({
         "ok": True,
         "server_time": timezone.now().isoformat(),
@@ -927,7 +927,7 @@ def employee_bootstrap(request):
     agent_version = str((machine.system_info or {}).get("agent_version", "")) if machine else ""
     machine_ready = bool(
         machine and machine.online and machine.system_info and machine.metrics_updated_at
-        and agent_version.startswith("4.2")
+        and agent_version.startswith("4.")
         and ((machine.system_info or {}).get("hostname") or machine.name)
     )
     return Response({
@@ -1304,18 +1304,44 @@ def _uuid_list(values, limit=500):
         return None
 
 
+def _normalize_browser_rule(raw):
+    """Normalize common admin-entered forms to Edge/Chrome URLBlocklist syntax.
+
+    For URLBlocklist/URLAllowlist, a plain host like ``youtube.com`` already
+    matches that host and its subdomains.  The ``[*.]`` form belongs to other
+    Chromium policy families and is easy for admins to paste here by mistake.
+    """
+    value = str(raw or "").strip()
+    if not value or len(value) > 240 or any(ch in value for ch in "\r\n\0"):
+        return ""
+    if value == "*":
+        return value
+    if value.startswith("[*.]"):
+        value = value[4:]
+    elif value.startswith("*."):
+        value = value[2:]
+    # A trailing /* is unnecessary/invalid for the list-based URL filter syntax.
+    if value.endswith("/*"):
+        value = value[:-2]
+    # Admins commonly paste https://host/* when they mean both HTTP and HTTPS.
+    # Keep a meaningful path, but reduce scheme + bare host to the host rule.
+    for prefix in ("https://", "http://"):
+        if value.lower().startswith(prefix):
+            rest = value[len(prefix):]
+            if "/" not in rest:
+                value = rest
+            break
+    return value.strip().rstrip("/")
+
+
 def _clean_sites(values):
     if not isinstance(values, list):
         return []
     out = []
     for raw in values[:300]:
-        value = str(raw).strip()
-        if not value or len(value) > 240:
-            continue
-        # Browser policy URL patterns; no commands/scripts are accepted here.
-        if any(ch in value for ch in "\r\n\0"):
-            continue
-        out.append(value)
+        value = _normalize_browser_rule(raw)
+        if value:
+            out.append(value)
     return list(dict.fromkeys(out))
 
 
@@ -2022,7 +2048,7 @@ def employee_request_password_otp(request):
         return Response({"detail": "Connect your company PC before setting your permanent password."}, status=409)
     machine = profile.assigned_machine
     agent_version = str((machine.system_info or {}).get("agent_version", ""))
-    if not machine.online or not machine.system_info or not machine.metrics_updated_at or not agent_version.startswith("4.2"):
+    if not machine.online or not machine.system_info or not machine.metrics_updated_at or not agent_version.startswith("4."):
         return Response({"detail": "PC is paired but the verified Agent 4.2 inventory/telemetry sync is not complete yet. Run the latest agent update as Administrator and retry."}, status=409)
 
     now = timezone.now()

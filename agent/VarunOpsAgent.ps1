@@ -181,7 +181,7 @@ function Get-SystemInfo {
     resolution=$resolution
     mouse_devices=$mouse
     keyboard_devices=$keyboard
-    agent_version='4.3.0-enterpriseux'
+    agent_version='4.3.1-policyfix'
   }
 }
 
@@ -212,7 +212,7 @@ function Get-SystemInfoCore($FullInfo=$null) {
     motherboard_model=[string]$FullInfo.motherboard_model
     motherboard_serial=[string]$FullInfo.motherboard_serial
     resolution=[string]$FullInfo.resolution
-    agent_version='4.3.0-enterpriseux'
+    agent_version='4.3.1-policyfix'
   }
 }
 
@@ -359,17 +359,50 @@ function Apply-StrictBrowserLock([bool]$Enabled) {
   foreach($path in @($candidates | Where-Object { $_ } | Select-Object -Unique)) { Add-BlockedBrowserRule $path }
 }
 
+function Normalize-UrlPolicyRule([string]$Rule) {
+  $v=[string]$Rule
+  if([string]::IsNullOrWhiteSpace($v)){ return '' }
+  $v=$v.Trim()
+  if($v -eq '*'){ return '*' }
+  if($v.StartsWith('[*.]')){ $v=$v.Substring(4) }
+  elseif($v.StartsWith('*.')){ $v=$v.Substring(2) }
+  if($v.EndsWith('/*')){ $v=$v.Substring(0,$v.Length-2) }
+  if($v.StartsWith('https://',[System.StringComparison]::OrdinalIgnoreCase)){ $rest=$v.Substring(8); if(-not $rest.Contains('/')){$v=$rest} }
+  elseif($v.StartsWith('http://',[System.StringComparison]::OrdinalIgnoreCase)){ $rest=$v.Substring(7); if(-not $rest.Contains('/')){$v=$rest} }
+  return $v.Trim().TrimEnd('/')
+}
+
+function Get-UrlListValues([string]$Path) {
+  if(-not (Test-Path $Path)){ return @() }
+  $item=Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue
+  if(-not $item){ return @() }
+  $rows=@()
+  foreach($prop in $item.PSObject.Properties | Where-Object { $_.Name -match '^\d+$' } | Sort-Object { [int]$_.Name }) {
+    $rows += [string]$prop.Value
+  }
+  return @($rows)
+}
+
 function Apply-NetworkPolicy($policy) {
   $bases=@('HKLM:\SOFTWARE\Policies\Microsoft\Edge','HKLM:\SOFTWARE\Policies\Google\Chrome')
   foreach($b in $bases) { Set-UrlList "$b\URLBlocklist" @(); Set-UrlList "$b\URLAllowlist" @() }
-  if ($null -eq $policy) { Apply-StrictBrowserLock $false; return }
-  $block=@($policy.blocked_sites); $allow=@()
-  if ([string]$policy.mode -eq 'allowlist') { $block=@('*'); $allow=@($policy.allowed_sites) }
+  if ($null -eq $policy) { Apply-StrictBrowserLock $false; return @{id='';revision=0;verified=$true;rules=@()} }
+  $block=@($policy.blocked_sites | ForEach-Object { Normalize-UrlPolicyRule ([string]$_) } | Where-Object { $_ })
+  $allow=@($policy.allowed_sites | ForEach-Object { Normalize-UrlPolicyRule ([string]$_) } | Where-Object { $_ })
+  if ([string]$policy.mode -eq 'allowlist') { $block=@('*') }
+  else { $allow=@() }
   $targets=@()
   if ($policy.enforce_edge) {$targets += 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'}
   if ($policy.enforce_chrome) {$targets += 'HKLM:\SOFTWARE\Policies\Google\Chrome'}
   foreach($b in $targets) { Set-UrlList "$b\URLBlocklist" $block; Set-UrlList "$b\URLAllowlist" $allow }
   Apply-StrictBrowserLock ([bool]$policy.strict_browsing)
+  $verified=$true
+  foreach($b in $targets){
+    $actual=@(Get-UrlListValues "$b\URLBlocklist")
+    if(@(Compare-Object -ReferenceObject @($block) -DifferenceObject @($actual)).Count -gt 0){ $verified=$false }
+  }
+  Write-AgentLog ("Network policy applied: id={0} rev={1} verified={2} block=[{3}]" -f $policy.id,$policy.revision,$verified,($block -join ','))
+  return @{id=[string]$policy.id;revision=[int]$policy.revision;verified=[bool]$verified;rules=@($block)}
 }
 
 function Ensure-Enrolled {
@@ -464,12 +497,16 @@ function Agent-Cycle {
   Ensure-Enrolled
   $cfg=Load-Config
   $manifest=Invoke-AgentApi '/api/agent/manifest/' 'GET'
-  Apply-NetworkPolicy $manifest.network_policy
+  $policyAck=Apply-NetworkPolicy $manifest.network_policy
 
   # Phase 1: send only conservative JSON-safe core hardware + telemetry.
   # This makes onboarding resilient even if an optional WMI/peripheral field is malformed.
   $fullInfo=Get-SystemInfo
   $coreInfo=Get-SystemInfoCore $fullInfo
+  $coreInfo['network_policy_applied_id']=[string]$policyAck.id
+  $coreInfo['network_policy_applied_revision']=[int]$policyAck.revision
+  $coreInfo['network_policy_verified']=[bool]$policyAck.verified
+  $coreInfo['network_policy_rules']=@($policyAck.rules)
   $metrics=Get-Metrics
   $coreHeartbeat=@{
     system_info=$coreInfo

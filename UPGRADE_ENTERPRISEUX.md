@@ -31,3 +31,7 @@ In Admin > Software > Add software:
 Use **Check latest GitHub release** before saving. VarunOps resolves the latest published release and uses the release asset download URL. A SHA-256 checksum is mandatory; when GitHub exposes a SHA-256 digest it is filled automatically, otherwise enter the exact checksum manually.
 
 Use **Refresh GitHub** later to sync a newer release. Automatic refresh refuses to change the package when the new release has no SHA-256 digest.
+
+
+## Agent 4.3.1 PolicyFix
+Existing PCs must run the newest UPDATE_EXISTING_AGENT.bat as Administrator. The Admin Policies page now shows endpoint Applied/Pending status. For troubleshooting run CHECK_WEB_POLICY.bat and inspect chrome://policy or edge://policy.
