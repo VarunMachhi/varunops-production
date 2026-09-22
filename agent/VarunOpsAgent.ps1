@@ -2,9 +2,9 @@
 # Runs as SYSTEM from Task Scheduler. No Python runtime is required.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$AgentVersion = '4.4.1-livepolicy'
+$AgentVersion = '4.4.2-livefast'
 $script:RestartForUpdate = $false
-$PolicyPollSeconds = 10
+$PolicyPollSeconds = 5
 
 $Base = Join-Path $env:ProgramData 'VarunOps'
 $ConfigPath = Join-Path $Base 'agent.json'
@@ -369,12 +369,17 @@ function Find-CatalogApps($manifest,$inventory) {
 }
 
 function Set-UrlList([string]$Path,$Values) {
-  if (Test-Path $Path) {
-    $item=Get-Item $Path
-    foreach($name in $item.Property) { if ($name -match '^\d+$') { Remove-ItemProperty -Path $Path -Name $name -ErrorAction SilentlyContinue } }
-  } else { New-Item -Path $Path -Force | Out-Null }
+  # Delete the complete list key first. This is more reliable than deleting numbered
+  # values one-by-one and makes policy removal visible to Chrome/Edge immediately.
+  if (Test-Path $Path) { Remove-Item -Path $Path -Recurse -Force -ErrorAction Stop }
+  $clean=@($Values | ForEach-Object { [string]$_ } | Where-Object { $_ })
+  if($clean.Count -eq 0){ return }
+  New-Item -Path $Path -Force | Out-Null
   $i=1
-  foreach($v in @($Values)) { New-ItemProperty -Path $Path -Name ([string]$i) -Value ([string]$v) -PropertyType String -Force | Out-Null; $i++ }
+  foreach($v in $clean) {
+    New-ItemProperty -Path $Path -Name ([string]$i) -Value ([string]$v) -PropertyType String -Force | Out-Null
+    $i++
+  }
 }
 
 function Remove-VarunOpsBrowserBlocks {
@@ -445,8 +450,20 @@ function Get-UrlListValues([string]$Path) {
 
 function Apply-NetworkPolicy($policy) {
   $bases=@('HKLM:\SOFTWARE\Policies\Microsoft\Edge','HKLM:\SOFTWARE\Policies\Google\Chrome')
+  # Always clear VarunOps-owned URL list keys first so OFF/edit/delete never leaves stale rules.
   foreach($b in $bases) { Set-UrlList "$b\URLBlocklist" @(); Set-UrlList "$b\URLAllowlist" @() }
-  if ($null -eq $policy) { Apply-StrictBrowserLock $false; return @{id='';revision=0;verified=$true;rules=@()} }
+  if ($null -eq $policy) {
+    Apply-StrictBrowserLock $false
+    try { Clear-DnsClientCache -ErrorAction SilentlyContinue | Out-Null } catch {}
+    $verified=$true
+    foreach($b in $bases){
+      if(@(Get-UrlListValues "$b\URLBlocklist").Count -gt 0){$verified=$false}
+      if(@(Get-UrlListValues "$b\URLAllowlist").Count -gt 0){$verified=$false}
+    }
+    try { if(@(Get-NetFirewallRule -Group 'VarunOps Strict Browsing' -ErrorAction SilentlyContinue).Count -gt 0){$verified=$false} } catch {}
+    Write-AgentLog ("Network policy removed: verified={0}" -f $verified)
+    return @{id='';revision=0;verified=[bool]$verified;rules=@()}
+  }
   $block=@($policy.blocked_sites | ForEach-Object { Normalize-UrlPolicyRule ([string]$_) } | Where-Object { $_ })
   $allow=@($policy.allowed_sites | ForEach-Object { Normalize-UrlPolicyRule ([string]$_) } | Where-Object { $_ })
   if ([string]$policy.mode -eq 'allowlist') { $block=@('*') }
@@ -456,10 +473,15 @@ function Apply-NetworkPolicy($policy) {
   if ($policy.enforce_chrome) {$targets += 'HKLM:\SOFTWARE\Policies\Google\Chrome'}
   foreach($b in $targets) { Set-UrlList "$b\URLBlocklist" $block; Set-UrlList "$b\URLAllowlist" $allow }
   Apply-StrictBrowserLock ([bool]$policy.strict_browsing)
+  try { Clear-DnsClientCache -ErrorAction SilentlyContinue | Out-Null } catch {}
   $verified=$true
-  foreach($b in $targets){
-    $actual=@(Get-UrlListValues "$b\URLBlocklist")
-    if(@(Compare-Object -ReferenceObject @($block) -DifferenceObject @($actual)).Count -gt 0){ $verified=$false }
+  foreach($b in $bases){
+    $expectedBlock=$(if($targets -contains $b){@($block)}else{@()})
+    $expectedAllow=$(if($targets -contains $b){@($allow)}else{@()})
+    $actualBlock=@(Get-UrlListValues "$b\URLBlocklist")
+    $actualAllow=@(Get-UrlListValues "$b\URLAllowlist")
+    if(@(Compare-Object -ReferenceObject @($expectedBlock) -DifferenceObject @($actualBlock)).Count -gt 0){ $verified=$false }
+    if(@(Compare-Object -ReferenceObject @($expectedAllow) -DifferenceObject @($actualAllow)).Count -gt 0){ $verified=$false }
   }
   Write-AgentLog ("Network policy applied: id={0} rev={1} verified={2} block=[{3}]" -f $policy.id,$policy.revision,$verified,($block -join ','))
   return @{id=[string]$policy.id;revision=[int]$policy.revision;verified=[bool]$verified;rules=@($block)}
@@ -500,8 +522,14 @@ function Sync-NetworkPolicyFast([bool]$Force=$false) {
   }
   $serverAck=Invoke-AgentApi '/api/agent/policy-ack/' 'POST' $body
   $cfg=Load-Config
-  $cfg | Add-Member -NotePropertyName last_policy_token -NotePropertyValue $token -Force
-  $cfg | Add-Member -NotePropertyName last_policy_verify_utc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
+  if([bool]$localAck.verified -and [bool]$serverAck.matches_desired){
+    $cfg | Add-Member -NotePropertyName last_policy_token -NotePropertyValue $token -Force
+    $cfg | Add-Member -NotePropertyName last_policy_verify_utc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
+  } else {
+    # Do not cache a failed desired state. Retry on the next fast-policy tick.
+    $cfg | Add-Member -NotePropertyName last_policy_token -NotePropertyValue '' -Force
+    $cfg | Add-Member -NotePropertyName last_policy_verify_utc -NotePropertyValue '' -Force
+  }
   Save-Config $cfg
   Write-AgentLog ("Policy sync ack: id={0} rev={1} enabled={2} verified={3} desired={4}" -f $policyId,$revision,$enabled,$localAck.verified,$serverAck.matches_desired)
   return $body

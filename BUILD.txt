@@ -1,4 +1,1 @@
-Live Website Policy Control + endpoint acknowledgement
-
-Agent self-update: 4.4.1-livepolicy
-Policy control poll: ~10 seconds for online endpoints
+VarunOps Pro LivePolicy 4.4.2 — reliable fast ON/OFF + spacious policy controls

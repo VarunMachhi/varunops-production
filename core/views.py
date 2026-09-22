@@ -1547,6 +1547,20 @@ def admin_agent_mode(request):
     return Response({"ok": True, "live": live})
 
 
+
+
+def _invalidate_network_policy_acks(policy):
+    """Mark endpoint policy acknowledgements stale after desired state changes."""
+    if not policy or not getattr(policy, "pk", None):
+        return 0
+    return Machine.objects.filter(network_policy=policy, enabled=True).update(
+        browser_policy_ack_id=None,
+        browser_policy_ack_revision=0,
+        browser_policy_ack_enabled=False,
+        browser_policy_ack_verified=False,
+        browser_policy_ack_at=None,
+    )
+
 @api_view(["POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAdminUser])
@@ -1580,6 +1594,8 @@ def admin_network_policy_save(request):
         obj.enabled = True
     obj.revision = 1 if not policy_id else (obj.revision or 0) + 1
     obj.save()
+    # Any edit changes desired endpoint state. Keep assignments, but require a fresh endpoint acknowledgement.
+    _invalidate_network_policy_acks(obj)
     audit(request, "network_policy.save", f"Saved network policy {obj.name}", "success", metadata={"policy_id": obj.pk, "mode": obj.mode, "revision": obj.revision})
     return Response(NetworkPolicySerializer(obj).data, status=201 if not policy_id else 200)
 
@@ -1598,7 +1614,14 @@ def admin_network_policy_assign(request):
             policy = NetworkPolicy.objects.get(pk=int(policy_id), enabled=True)
         except (NetworkPolicy.DoesNotExist, ValueError, TypeError):
             return Response({"detail": "Network policy not found."}, status=404)
-    updated = Machine.objects.filter(id__in=machine_ids, enabled=True).update(network_policy=policy)
+    updated = Machine.objects.filter(id__in=machine_ids, enabled=True).update(
+        network_policy=policy,
+        browser_policy_ack_id=None,
+        browser_policy_ack_revision=0,
+        browser_policy_ack_enabled=False,
+        browser_policy_ack_verified=False,
+        browser_policy_ack_at=None,
+    )
     audit(request, "network_policy.assign", f"Network policy {policy.name if policy else 'None'} applied to {updated} machine(s)", "success")
     return Response({"updated": updated})
 
@@ -1616,6 +1639,7 @@ def admin_network_policy_toggle(request, policy_id):
         policy.enabled = enabled
         policy.revision = (policy.revision or 0) + 1
         policy.save(update_fields=["enabled", "revision", "updated_at"])
+        _invalidate_network_policy_acks(policy)
         audit(
             request,
             "network_policy.toggle",
@@ -1637,7 +1661,14 @@ def admin_network_policy_delete(request, policy_id):
     name = policy.name
     assigned_ids = list(Machine.objects.filter(network_policy=policy, enabled=True).values_list("id", flat=True))
     with transaction.atomic():
-        Machine.objects.filter(network_policy=policy).update(network_policy=None)
+        Machine.objects.filter(network_policy=policy).update(
+            network_policy=None,
+            browser_policy_ack_id=None,
+            browser_policy_ack_revision=0,
+            browser_policy_ack_enabled=False,
+            browser_policy_ack_verified=False,
+            browser_policy_ack_at=None,
+        )
         policy.delete()
     audit(
         request,
