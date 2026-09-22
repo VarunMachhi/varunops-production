@@ -1,1 +1,6 @@
-VarunOps Pro LivePolicy 4.4.2 — reliable fast ON/OFF + spacious policy controls
+VarunOps Pro 4.4.3 PresenceFast
+- 5s live policy poll
+- policy-state doubles as presence heartbeat
+- 30s online threshold
+- scheduled-task watchdog + self-heal
+- self-update restarts through Task Scheduler

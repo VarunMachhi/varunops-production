@@ -2,13 +2,29 @@
 # Runs as SYSTEM from Task Scheduler. No Python runtime is required.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$AgentVersion = '4.4.2-livefast'
+$AgentVersion = '4.4.4-defenderfriendly'
 $script:RestartForUpdate = $false
 $PolicyPollSeconds = 5
 
 $Base = Join-Path $env:ProgramData 'VarunOps'
 $ConfigPath = Join-Path $Base 'agent.json'
 $LogPath = Join-Path $Base 'agent.log'
+
+# Keep exactly one persistent endpoint process. One-shot repair/diagnostic runs are
+# intentionally allowed alongside it.
+$script:OneShotMode = ($args -contains '--once') -or ($args -contains '--once-strict')
+$script:AgentMutex = $null
+if(-not $script:OneShotMode){
+  try {
+    $script:AgentMutex = New-Object System.Threading.Mutex($false,'Global\\VarunOpsAgentSingleton')
+    $gotMutex=$false
+    try { $gotMutex=$script:AgentMutex.WaitOne(0,$false) }
+    catch [System.Threading.AbandonedMutexException] { $gotMutex=$true }
+    if(-not $gotMutex){ exit 0 }
+  } catch {
+    # Do not prevent management if mutex creation is unavailable on a rare host.
+  }
+}
 
 function Write-AgentLog([string]$Message) {
   New-Item -ItemType Directory -Path $Base -Force | Out-Null
@@ -79,15 +95,9 @@ function Get-VersionObject([string]$Value) {
 }
 
 function Start-NewAgentAfterUpdate {
-  $target=Join-Path $Base 'VarunOpsAgent.ps1'
-  $restart=Join-Path $Base 'restart_after_update.ps1'
-  $content=@"
-Start-Sleep -Seconds 3
-Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$target`"' -WindowStyle Hidden
-Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
-"@
-  Set-Content -Path $restart -Value $content -Encoding UTF8
-  Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$restart) -WindowStyle Hidden | Out-Null
+  # Avoid spawning a hidden PowerShell helper. The Windows Task Scheduler watchdog
+  # launches the verified replacement agent after this process exits.
+  Write-AgentLog 'Self-update staged. Scheduler watchdog will start the new agent.'
 }
 
 function Check-SelfUpdate($manifest) {
@@ -124,6 +134,33 @@ function Check-SelfUpdate($manifest) {
     return $true
   } finally {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Ensure-AgentTaskHealthy {
+  try {
+    $target=Join-Path $Base 'VarunOpsAgent.ps1'
+    $task=Get-ScheduledTask -TaskName 'VarunOps Agent' -ErrorAction SilentlyContinue
+    $needsRepair=$false
+    if($null -eq $task){ $needsRepair=$true }
+    else {
+      $a=$task.Actions | Select-Object -First 1
+      $actionText=([string]$a.Execute)+' '+([string]$a.Arguments)
+      if($actionText -notmatch 'VarunOpsAgent\.ps1'){ $needsRepair=$true }
+      # Older builds used only an AtStartup trigger. Repair them once so the
+      # scheduler can relaunch the persistent agent if it ever exits.
+      if(@($task.Triggers).Count -lt 2){ $needsRepair=$true }
+    }
+    if($needsRepair){
+      $action=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$target`""
+      $startup=New-ScheduledTaskTrigger -AtStartup
+      $watch=New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
+      $settings=New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 10 -RestartInterval (New-TimeSpan -Seconds 30) -ExecutionTimeLimit (New-TimeSpan -Days 3650) -MultipleInstances IgnoreNew
+      Register-ScheduledTask -TaskName 'VarunOps Agent' -Action $action -Trigger @($startup,$watch) -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
+      Write-AgentLog 'Scheduled task self-healed with startup + watchdog trigger.'
+    }
+  } catch {
+    Write-AgentLog ('Scheduled task health warning: '+$_.Exception.Message)
   }
 }
 
@@ -624,6 +661,7 @@ function Process-AgentTasks([bool]$DryRun) {
 }
 
 function Agent-Cycle {
+  Ensure-AgentTaskHealthy
   Ensure-Enrolled
   $cfg=Load-Config
   $manifest=Invoke-AgentApi '/api/agent/manifest/' 'GET'

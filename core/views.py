@@ -120,61 +120,108 @@ def _agent_release_metadata(request=None):
 
 @login_required
 def employee_agent_package(request):
+    # Build the Windows connector without separate installer PowerShell helper files.
     if request.user.is_staff:
         return JsonResponse({"detail": "Staff accounts use the admin console."}, status=403)
     base_url = request.build_absolute_uri("/").rstrip("/")
     agent_dir = settings.BASE_DIR / "agent"
-    files = ["VarunOpsAgent.ps1", "install_agent.ps1", "update_agent.ps1", "CHECK_AGENT.bat", "CHECK_WEB_POLICY.bat"]
+    files = ["VarunOpsAgent.ps1", "CHECK_AGENT.bat", "CHECK_WEB_POLICY.bat"]
     for name in files:
         if not (agent_dir / name).exists():
             return JsonResponse({"detail": f"Agent package is missing {name}."}, status=500)
-    bat = """@echo off
-setlocal
+
+    bat = r'''@echo off
+setlocal EnableExtensions DisableDelayedExpansion
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-  powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+  powershell.exe -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
   exit /b
 )
+
 echo.
 echo ==================================
 echo   VarunOps - Connect This Company PC
 echo ==================================
 echo Server: __SERVER__
 echo.
-set /p CODE=Enter the 8-digit pairing code from VarunOps: 
-set /p BRANCH=Branch name (optional): 
-if "%CODE%"=="" goto :bad
-powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0install_agent.ps1" -ServerUrl "__SERVER__" -PairingCode "%CODE%" -Branch "%BRANCH%"
-if errorlevel 1 goto :bad
+set /p VOPS_CODE=Enter the 8-digit pairing code from VarunOps: 
+set /p VOPS_BRANCH=Branch name (optional): 
+if not defined VOPS_CODE goto :bad
+
+echo %VOPS_CODE%| findstr /r /x "[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]" >nul || goto :bad
+set "VOPS_SERVER=__SERVER__"
+set "VOPS_BASE=%ProgramData%\VarunOps"
+if not exist "%VOPS_BASE%" mkdir "%VOPS_BASE%"
+copy /y "%~dp0VarunOpsAgent.ps1" "%VOPS_BASE%\VarunOpsAgent.ps1" >nul || goto :bad
+
+rem Build config from environment variables instead of running an installer PowerShell script.
+powershell.exe -NoLogo -NoProfile -Command "$o=[ordered]@{server_url=$env:VOPS_SERVER;pairing_code=$env:VOPS_CODE;branch=$env:VOPS_BRANCH;device_type='Desktop';poll_seconds=60}; $o|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $env:VOPS_BASE 'agent.json') -Encoding UTF8" || goto :bad
+
+icacls "%VOPS_BASE%" /inheritance:r >nul
+icacls "%VOPS_BASE%" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" >nul
+call :tasks || goto :bad
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%VOPS_BASE%\VarunOpsAgent.ps1" --once-strict || goto :bad
+schtasks /Run /TN "VarunOps Agent" >nul 2>&1
+
 echo.
-echo PC connected to VarunOps.
+echo PC connected to VarunOps successfully.
+echo The background agent is supervised by Windows Task Scheduler.
 pause
 exit /b 0
+
+:tasks
+schtasks /Delete /TN "VarunOps Agent" /F >nul 2>&1
+schtasks /Delete /TN "VarunOps Agent Watchdog" /F >nul 2>&1
+schtasks /Create /TN "VarunOps Agent" /TR "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%VOPS_BASE%\VarunOpsAgent.ps1\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F >nul || exit /b 1
+rem Watchdog launches the same singleton agent once a minute; extra instances exit immediately.
+schtasks /Create /TN "VarunOps Agent Watchdog" /TR "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%VOPS_BASE%\VarunOpsAgent.ps1\"" /SC MINUTE /MO 1 /RU SYSTEM /RL HIGHEST /F >nul || exit /b 1
+exit /b 0
+
 :bad
 echo.
-echo Setup failed. Check the code and internet connection.
+echo Setup failed. Verify the pairing code, internet connection and Windows Security Protection History.
 pause
 exit /b 1
-""".replace("__SERVER__", base_url)
-    update_bat = """@echo off
-setlocal
+'''.replace("__SERVER__", base_url)
+
+    update_bat = r'''@echo off
+setlocal EnableExtensions DisableDelayedExpansion
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-  powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+  powershell.exe -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
   exit /b
 )
-powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0update_agent.ps1"
-if errorlevel 1 (
-  echo.
-  echo Agent update failed.
-  pause
-  exit /b 1
-)
+set "VOPS_BASE=%ProgramData%\VarunOps"
+if not exist "%VOPS_BASE%\agent.json" goto :missing
+copy /y "%~dp0VarunOpsAgent.ps1" "%VOPS_BASE%\VarunOpsAgent.ps1" >nul || goto :bad
+icacls "%VOPS_BASE%" /inheritance:r >nul
+icacls "%VOPS_BASE%" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" >nul
+
+schtasks /Delete /TN "VarunOps Agent" /F >nul 2>&1
+schtasks /Delete /TN "VarunOps Agent Watchdog" /F >nul 2>&1
+schtasks /Create /TN "VarunOps Agent" /TR "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%VOPS_BASE%\VarunOpsAgent.ps1\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F >nul || goto :bad
+schtasks /Create /TN "VarunOps Agent Watchdog" /TR "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%VOPS_BASE%\VarunOpsAgent.ps1\"" /SC MINUTE /MO 1 /RU SYSTEM /RL HIGHEST /F >nul || goto :bad
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%VOPS_BASE%\VarunOpsAgent.ps1" --once-strict || goto :bad
+schtasks /Run /TN "VarunOps Agent" >nul 2>&1
+
 echo.
-echo Agent repaired and verified. Refresh VarunOps in 10-20 seconds.
+echo Agent repaired, synced and restarted successfully.
 pause
-"""
-    readme = f"""VarunOps PC Connector
+exit /b 0
+
+:missing
+echo No existing VarunOps registration was found. Use CONNECT_THIS_PC.bat instead.
+pause
+exit /b 2
+
+:bad
+echo.
+echo Agent repair failed. Check C:\ProgramData\VarunOps\agent.log and Windows Security Protection History.
+pause
+exit /b 1
+'''
+
+    readme = f'''VarunOps PC Connector
 
 NEW PC
 1. Sign in to {base_url}/employee/
@@ -183,10 +230,11 @@ NEW PC
 4. Run CONNECT_THIS_PC.bat as Administrator and enter the code.
 
 EXISTING VARUNOPS PC
-If this PC is already paired but the portal says the first full scan is incomplete, run UPDATE_EXISTING_AGENT.bat as Administrator. It preserves the existing device registration, replaces legacy EXE scheduled tasks, runs a strict server sync test, and upgrades the inventory collector.
+Run UPDATE_EXISTING_AGENT.bat as Administrator. It keeps the existing device identity, replaces the agent file, verifies a strict cloud sync, and restores the Task Scheduler watchdog.
 
-The first install starts in TEST mode. Software commands remain queued until IT intentionally enables LIVE actions from the Admin device page.
-"""
+WINDOWS SECURITY
+VarunOps changes enterprise browser policy, inventories hardware/software, and runs as a SYSTEM scheduled task. Those are privileged endpoint-management behaviors. Do not disable Microsoft Defender globally. If Windows Security blocks a connector file, review Protection History for the exact detection and submit a suspected false positive to Microsoft before creating any exclusion.
+'''
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for name in files:
@@ -546,8 +594,15 @@ def _network_policy_assignment(machine):
 @throttle_classes([AgentThrottle])
 def agent_policy_state(request):
     machine = request.auth
+    # The fast policy channel doubles as a lightweight presence heartbeat.
+    # Do not add a second polling endpoint: this keeps 60+ endpoints cheap while
+    # making Online/Offline reflect the agent process within a few seconds.
+    now = timezone.now()
+    if not machine.last_seen or (now - machine.last_seen).total_seconds() >= 10:
+        Machine.objects.filter(pk=machine.pk).update(last_seen=now)
+        machine.last_seen = now
     assignment, policy = _network_policy_assignment(machine)
-    response = Response({"assignment": assignment, "policy": policy})
+    response = Response({"assignment": assignment, "policy": policy, "server_time": now.isoformat()})
     response["Cache-Control"] = "private, no-store"
     return response
 

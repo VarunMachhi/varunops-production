@@ -54,7 +54,7 @@ class Machine(models.Model):
     def online(self):
         if not self.last_seen:
             return False
-        return (timezone.now() - self.last_seen).total_seconds() <= 180
+        return (timezone.now() - self.last_seen).total_seconds() <= 30
 
     def __str__(self):
         return self.name

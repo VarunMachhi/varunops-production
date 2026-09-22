@@ -17,3 +17,7 @@ Supported deployment sources:
 - Direct HTTPS EXE/MSI with exact SHA-256 and argument arrays.
 
 The agent never accepts arbitrary remote PowerShell/CMD text from the server.
+
+
+## Defender-friendly bootstrap
+The deploy source no longer contains `install_agent.ps1` or `update_agent.ps1`. The authenticated employee connector endpoint generates transparent BAT bootstrap/update files at download time.
