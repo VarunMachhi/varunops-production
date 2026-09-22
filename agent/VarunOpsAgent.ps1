@@ -2,8 +2,9 @@
 # Runs as SYSTEM from Task Scheduler. No Python runtime is required.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$AgentVersion = '4.4.0-autoupdate'
+$AgentVersion = '4.4.1-livepolicy'
 $script:RestartForUpdate = $false
+$PolicyPollSeconds = 10
 
 $Base = Join-Path $env:ProgramData 'VarunOps'
 $ConfigPath = Join-Path $Base 'agent.json'
@@ -464,6 +465,48 @@ function Apply-NetworkPolicy($policy) {
   return @{id=[string]$policy.id;revision=[int]$policy.revision;verified=[bool]$verified;rules=@($block)}
 }
 
+function Sync-NetworkPolicyFast([bool]$Force=$false) {
+  Ensure-Enrolled
+  $state=Invoke-AgentApi '/api/agent/policy-state/' 'GET'
+  $assignment=$state.assignment
+  $policy=$state.policy
+  $policyId=''; $revision=0; $enabled=$false
+  if($null -ne $assignment){
+    $policyId=[string]$assignment.id
+    try{$revision=[int]$assignment.revision}catch{$revision=0}
+    $enabled=[bool]$assignment.enabled
+  }
+  $token=("{0}:{1}:{2}" -f $policyId,$revision,$enabled)
+  $cfg=Load-Config
+  $due=$Force -or ([string]$cfg.last_policy_token -ne $token)
+  if(-not $due){
+    try{
+      if(-not $cfg.last_policy_verify_utc){$due=$true}
+      else{
+        $last=[datetime]::Parse([string]$cfg.last_policy_verify_utc).ToUniversalTime()
+        if(((Get-Date).ToUniversalTime()-$last).TotalSeconds -ge 60){$due=$true}
+      }
+    }catch{$due=$true}
+  }
+  if(-not $due){return $null}
+
+  $localAck=Apply-NetworkPolicy $policy
+  $body=@{
+    policy_id=$policyId
+    revision=$revision
+    enabled=$enabled
+    verified=[bool]$localAck.verified
+    rules=@($localAck.rules)
+  }
+  $serverAck=Invoke-AgentApi '/api/agent/policy-ack/' 'POST' $body
+  $cfg=Load-Config
+  $cfg | Add-Member -NotePropertyName last_policy_token -NotePropertyValue $token -Force
+  $cfg | Add-Member -NotePropertyName last_policy_verify_utc -NotePropertyValue ((Get-Date).ToUniversalTime().ToString('o')) -Force
+  Save-Config $cfg
+  Write-AgentLog ("Policy sync ack: id={0} rev={1} enabled={2} verified={3} desired={4}" -f $policyId,$revision,$enabled,$localAck.verified,$serverAck.matches_desired)
+  return $body
+}
+
 function Ensure-Enrolled {
   $cfg=Load-Config
   if ($cfg.agent_id -and $cfg.agent_key) { return }
@@ -557,16 +600,19 @@ function Agent-Cycle {
   $cfg=Load-Config
   $manifest=Invoke-AgentApi '/api/agent/manifest/' 'GET'
   if(Check-SelfUpdate $manifest) { return }
-  $policyAck=Apply-NetworkPolicy $manifest.network_policy
+  $policyAck=Sync-NetworkPolicyFast $true
 
   # Phase 1: send only conservative JSON-safe core hardware + telemetry.
   # This makes onboarding resilient even if an optional WMI/peripheral field is malformed.
   $fullInfo=Get-SystemInfo
   $coreInfo=Get-SystemInfoCore $fullInfo
-  $coreInfo['network_policy_applied_id']=[string]$policyAck.id
-  $coreInfo['network_policy_applied_revision']=[int]$policyAck.revision
-  $coreInfo['network_policy_verified']=[bool]$policyAck.verified
-  $coreInfo['network_policy_rules']=@($policyAck.rules)
+  if($null -ne $policyAck){
+    $coreInfo['network_policy_applied_id']=$(if([bool]$policyAck.enabled){[string]$policyAck.policy_id}else{''})
+    $coreInfo['network_policy_applied_revision']=[int]$policyAck.revision
+    $coreInfo['network_policy_verified']=[bool]$policyAck.verified
+    $coreInfo['network_policy_rules']=@($policyAck.rules)
+    $coreInfo['network_policy_ack']=@{policy_id=[string]$policyAck.policy_id;revision=[int]$policyAck.revision;enabled=[bool]$policyAck.enabled;verified=[bool]$policyAck.verified}
+  }
   $metrics=Get-Metrics
   $coreHeartbeat=@{
     system_info=$coreInfo
@@ -638,20 +684,34 @@ function Agent-Cycle {
 
 $strictOnce = $args -contains '--once-strict'
 $once = ($args -contains '--once') -or $strictOnce
-do {
+if($once){
   try {
     Agent-Cycle
-    if($script:RestartForUpdate) { Write-AgentLog 'Current agent process exiting for self-update restart.'; exit 0 }
-    if($strictOnce) { Write-Host 'VarunOps strict sync accepted.' -ForegroundColor Green }
+    if($script:RestartForUpdate){ Write-AgentLog 'Current agent process exiting for self-update restart.'; exit 0 }
+    if($strictOnce){ Write-Host 'VarunOps strict sync accepted.' -ForegroundColor Green }
+    exit 0
   } catch {
     Write-AgentLog ("Cycle failed: "+$_.Exception.Message)
-    if($strictOnce) {
-      Write-Error ("VarunOps strict sync failed: "+$_.Exception.Message)
-      exit 2
-    }
+    if($strictOnce){ Write-Error ("VarunOps strict sync failed: "+$_.Exception.Message) }
+    exit 2
   }
-  if ($once) { break }
-  try { $cfg=Load-Config; $seconds=[Math]::Max(30,[Math]::Min(300,[int]$cfg.poll_seconds)) } catch {$seconds=60}
-  Start-Sleep -Seconds $seconds
+}
+
+$nextFull=[datetime]::MinValue
+do {
+  try {
+    $now=(Get-Date).ToUniversalTime()
+    if($now -ge $nextFull){
+      Agent-Cycle
+      if($script:RestartForUpdate){ Write-AgentLog 'Current agent process exiting for self-update restart.'; exit 0 }
+      try{$cfg=Load-Config;$seconds=[Math]::Max(30,[Math]::Min(300,[int]$cfg.poll_seconds))}catch{$seconds=60}
+      $nextFull=(Get-Date).ToUniversalTime().AddSeconds($seconds)
+    } else {
+      Sync-NetworkPolicyFast $false | Out-Null
+    }
+  } catch {
+    Write-AgentLog ("Fast policy/full cycle failed: "+$_.Exception.Message)
+  }
+  Start-Sleep -Seconds $PolicyPollSeconds
 } while ($true)
 exit 0

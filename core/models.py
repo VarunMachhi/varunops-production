@@ -40,6 +40,12 @@ class Machine(models.Model):
     metrics_updated_at = models.DateTimeField(null=True, blank=True)
     agent_live_mode = models.BooleanField(default=False)
     asset_details = models.JSONField(default=dict, blank=True)
+    # Dedicated endpoint acknowledgement for fast website-policy control.
+    browser_policy_ack_id = models.PositiveIntegerField(null=True, blank=True)
+    browser_policy_ack_revision = models.PositiveIntegerField(default=0)
+    browser_policy_ack_enabled = models.BooleanField(default=False)
+    browser_policy_ack_verified = models.BooleanField(default=False)
+    browser_policy_ack_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["name"]

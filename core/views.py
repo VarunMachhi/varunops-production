@@ -510,6 +510,111 @@ def agent_enroll(request):
     return Response({"agent_id": str(machine.id), "agent_key": secret, "name": machine.name}, status=201)
 
 
+def _network_policy_assignment(machine):
+    """Return desired browser-policy state for one endpoint.
+
+    The assignment stays visible even while a policy is disabled. That lets the
+    agent acknowledge "removed" state instead of making OFF indistinguishable
+    from a never-assigned PC.
+    """
+    assigned = machine.network_policy if machine.network_policy_id else None
+    assignment = {
+        "id": assigned.pk if assigned else None,
+        "revision": int(assigned.revision or 0) if assigned else 0,
+        "enabled": bool(assigned.enabled) if assigned else False,
+        "name": assigned.name if assigned else "",
+    }
+    policy = None
+    if assigned and assigned.enabled:
+        policy = {
+            "id": assigned.pk,
+            "name": assigned.name,
+            "mode": assigned.mode,
+            "allowed_sites": _clean_sites(assigned.allowed_sites),
+            "blocked_sites": _clean_sites(assigned.blocked_sites),
+            "enforce_edge": assigned.enforce_edge,
+            "enforce_chrome": assigned.enforce_chrome,
+            "strict_browsing": assigned.strict_browsing,
+            "revision": assigned.revision,
+        }
+    return assignment, policy
+
+
+@api_view(["GET"])
+@authentication_classes([AgentKeyAuthentication])
+@permission_classes([IsAuthenticated])
+@throttle_classes([AgentThrottle])
+def agent_policy_state(request):
+    machine = request.auth
+    assignment, policy = _network_policy_assignment(machine)
+    response = Response({"assignment": assignment, "policy": policy})
+    response["Cache-Control"] = "private, no-store"
+    return response
+
+
+@api_view(["POST"])
+@authentication_classes([AgentKeyAuthentication])
+@permission_classes([IsAuthenticated])
+@throttle_classes([AgentThrottle])
+def agent_policy_ack(request):
+    machine = request.auth
+    data = request.data if isinstance(request.data, dict) else {}
+    assigned = machine.network_policy if machine.network_policy_id else None
+    expected_id = str(assigned.pk) if assigned else ""
+    expected_revision = int(assigned.revision or 0) if assigned else 0
+    expected_enabled = bool(assigned.enabled) if assigned else False
+
+    reported_id = str(data.get("policy_id") or "")
+    try:
+        reported_revision = max(0, int(data.get("revision") or 0))
+    except (TypeError, ValueError):
+        reported_revision = 0
+    reported_enabled = bool(data.get("enabled", False))
+    verified = bool(data.get("verified", False))
+    rules = _clean_sites(data.get("rules", []))
+    matches_desired = (
+        reported_id == expected_id
+        and reported_revision == expected_revision
+        and reported_enabled == expected_enabled
+        and verified
+    )
+
+    info = machine.system_info if isinstance(machine.system_info, dict) else {}
+    info = dict(info)
+    ack = {
+        "policy_id": reported_id,
+        "revision": reported_revision,
+        "enabled": reported_enabled,
+        "verified": verified,
+        "matches_desired": matches_desired,
+        "rules": rules[:50],
+        "acknowledged_at": timezone.now().isoformat(),
+    }
+    info["network_policy_ack"] = ack
+    # Backward-compatible fields used by older Admin UI builds.
+    info["network_policy_applied_id"] = reported_id if reported_enabled else ""
+    info["network_policy_applied_revision"] = reported_revision
+    info["network_policy_verified"] = verified
+    info["network_policy_rules"] = rules[:50]
+    machine.system_info = _bounded_json(info)
+    machine.browser_policy_ack_id = int(reported_id) if reported_id.isdigit() else None
+    machine.browser_policy_ack_revision = reported_revision
+    machine.browser_policy_ack_enabled = reported_enabled
+    machine.browser_policy_ack_verified = verified and matches_desired
+    machine.browser_policy_ack_at = timezone.now()
+    machine.last_seen = timezone.now()
+    machine.save(update_fields=[
+        "system_info", "browser_policy_ack_id", "browser_policy_ack_revision",
+        "browser_policy_ack_enabled", "browser_policy_ack_verified",
+        "browser_policy_ack_at", "last_seen",
+    ])
+    return Response({"ok": True, "matches_desired": matches_desired, "expected": {
+        "policy_id": expected_id,
+        "revision": expected_revision,
+        "enabled": expected_enabled,
+    }})
+
+
 @api_view(["GET"])
 @authentication_classes([AgentKeyAuthentication])
 @permission_classes([IsAuthenticated])
@@ -518,7 +623,7 @@ def agent_manifest(request):
     machine = request.auth
     apps = AppCatalog.objects.filter(enabled=True)
     app_policies = {p.app_id: p for p in MachineAppPolicy.objects.filter(machine=machine).select_related("app")}
-    policy = machine.network_policy if machine.network_policy_id and machine.network_policy and machine.network_policy.enabled else None
+    assignment, policy = _network_policy_assignment(machine)
     return Response({
         "agent_update": _agent_release_metadata(request),
         "apps": [
@@ -544,15 +649,8 @@ def agent_manifest(request):
         ],
         "compliance_mode": machine.compliance_mode,
         "live_actions": machine.agent_live_mode,
-        "network_policy": ({
-            "id": policy.pk, "name": policy.name, "mode": policy.mode,
-            # Always normalize again at delivery time so even policies created by older
-            # VarunOps builds are safe for Chrome/Edge URLBlocklist parsing.
-            "allowed_sites": _clean_sites(policy.allowed_sites), "blocked_sites": _clean_sites(policy.blocked_sites),
-            "enforce_edge": policy.enforce_edge, "enforce_chrome": policy.enforce_chrome,
-            "strict_browsing": policy.strict_browsing,
-            "revision": policy.revision,
-        } if policy else None),
+        "network_policy_assignment": assignment,
+        "network_policy": policy,
     })
 
 
@@ -601,8 +699,12 @@ def agent_heartbeat(request):
     if "system_info" in data:
         info = data.get("system_info")
         if isinstance(info, dict):
-            # hard cap simple JSON inventory to avoid unbounded storage abuse
-            machine.system_info = _bounded_json(info)
+            # Merge instead of replacing so fast policy acknowledgements are not
+            # erased by the later extended-hardware/inventory heartbeat.
+            existing_info = machine.system_info if isinstance(machine.system_info, dict) else {}
+            merged_info = dict(existing_info)
+            merged_info.update(_bounded_json(info))
+            machine.system_info = _bounded_json(merged_info)
         else:
             section_errors.append("system_info")
     machine.last_seen = timezone.now()
@@ -1472,7 +1574,10 @@ def admin_network_policy_save(request):
     obj.enforce_edge = bool(request.data.get("enforce_edge", True))
     obj.enforce_chrome = bool(request.data.get("enforce_chrome", True))
     obj.strict_browsing = bool(request.data.get("strict_browsing", False))
-    obj.enabled = bool(request.data.get("enabled", True))
+    if "enabled" in request.data:
+        obj.enabled = bool(request.data.get("enabled"))
+    elif not policy_id:
+        obj.enabled = True
     obj.revision = 1 if not policy_id else (obj.revision or 0) + 1
     obj.save()
     audit(request, "network_policy.save", f"Saved network policy {obj.name}", "success", metadata={"policy_id": obj.pk, "mode": obj.mode, "revision": obj.revision})
@@ -1496,6 +1601,52 @@ def admin_network_policy_assign(request):
     updated = Machine.objects.filter(id__in=machine_ids, enabled=True).update(network_policy=policy)
     audit(request, "network_policy.assign", f"Network policy {policy.name if policy else 'None'} applied to {updated} machine(s)", "success")
     return Response({"updated": updated})
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAdminUser])
+def admin_network_policy_toggle(request, policy_id):
+    try:
+        policy = NetworkPolicy.objects.get(pk=policy_id)
+    except NetworkPolicy.DoesNotExist:
+        return Response({"detail": "Network policy not found."}, status=404)
+    enabled = bool(request.data.get("enabled", not policy.enabled))
+    if policy.enabled != enabled:
+        policy.enabled = enabled
+        policy.revision = (policy.revision or 0) + 1
+        policy.save(update_fields=["enabled", "revision", "updated_at"])
+        audit(
+            request,
+            "network_policy.toggle",
+            f"Website policy {policy.name} {'enabled' if enabled else 'disabled'}",
+            "success" if enabled else "warning",
+            metadata={"policy_id": policy.pk, "revision": policy.revision, "enabled": enabled},
+        )
+    return Response(NetworkPolicySerializer(policy).data)
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAdminUser])
+def admin_network_policy_delete(request, policy_id):
+    try:
+        policy = NetworkPolicy.objects.get(pk=policy_id)
+    except NetworkPolicy.DoesNotExist:
+        return Response({"detail": "Network policy not found."}, status=404)
+    name = policy.name
+    assigned_ids = list(Machine.objects.filter(network_policy=policy, enabled=True).values_list("id", flat=True))
+    with transaction.atomic():
+        Machine.objects.filter(network_policy=policy).update(network_policy=None)
+        policy.delete()
+    audit(
+        request,
+        "network_policy.delete",
+        f"Deleted website policy {name}; removal queued for {len(assigned_ids)} endpoint(s)",
+        "warning",
+        metadata={"policy_name": name, "affected": len(assigned_ids)},
+    )
+    return Response({"deleted": True, "affected": len(assigned_ids)})
 
 
 @api_view(["POST"])

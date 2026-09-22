@@ -98,3 +98,7 @@ Render now starts VarunOps through `scripts/start_render.sh`. The script prints 
 ## Automatic endpoint agent updates
 
 After a PC is paired once, normal future VarunOps Agent upgrades do **not** require visiting that PC. Each agent checks the authenticated server manifest every polling cycle. If the deployed server contains a newer agent version, the endpoint downloads the canonical script over HTTPS, verifies the SHA-256 supplied by the authenticated manifest, replaces its local agent, restarts itself, and continues reporting. `UPDATE_EXISTING_AGENT.bat` remains only as a recovery/repair tool.
+
+## Live website policy control (4.4.1)
+
+Website policies now have Edit, Delete and ON/OFF controls in Admin. Agent 4.4.1+ checks a lightweight policy endpoint about every 10 seconds, independently from full telemetry, and acknowledges the exact desired revision after applying/removing registry and Strict Browsing rules. Admin therefore shows endpoint-confirmed `Applied` / `Removed` status rather than only server assignment.

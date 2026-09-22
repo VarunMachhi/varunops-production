@@ -1,3 +1,4 @@
-EnterpriseUX policy-all + stable device-policy selection
+Live Website Policy Control + endpoint acknowledgement
 
-Agent self-update: 4.4.0-autoupdate
+Agent self-update: 4.4.1-livepolicy
+Policy control poll: ~10 seconds for online endpoints

@@ -81,6 +81,7 @@ class MachineSerializer(serializers.ModelSerializer):
             "id", "name", "branch", "device_type", "ip_address", "os_version",
             "serial_number", "policy", "tags", "system_info", "asset_details", "last_seen",
             "enrolled_at", "enabled", "online", "installed_apps", "detected_software", "compliance_mode", "network_policy", "network_policy_name", "last_boot_at", "latest_metric", "metrics_updated_at", "agent_live_mode", "unauthorized_software", "app_policies", "assigned_employee_name", "recent_power_events",
+            "browser_policy_ack_id", "browser_policy_ack_revision", "browser_policy_ack_enabled", "browser_policy_ack_verified", "browser_policy_ack_at",
         ]
 
     def get_assigned_employee_name(self, obj):

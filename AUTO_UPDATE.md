@@ -1,6 +1,6 @@
 # VarunOps Agent Automatic Updates
 
-Agent version: `4.4.0-autoupdate`
+Agent version: `4.4.1-livepolicy`
 
 ## Normal behavior
 
@@ -19,10 +19,10 @@ After a PC has this version (or newer) installed, no local update action is requ
 Update `agent/VarunOpsAgent.ps1` and increase the leading semantic version in:
 
 ```powershell
-$AgentVersion = '4.4.1-description'
+$AgentVersion = '4.4.2-description'
 ```
 
-Deploy the project to Render. Connected 4.4.0+ endpoints will discover it on their next polling cycle (normally about 60 seconds).
+Deploy the project to Render. Connected 4.4.0+ endpoints will discover it automatically. Website policy state itself is checked by 4.4.1+ endpoints on a lightweight ~10-second control poll, while full telemetry remains on the normal slower interval.
 
 ## Existing older endpoints
 
