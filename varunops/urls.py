@@ -12,5 +12,6 @@ urlpatterns = [
     path("console/", views.console, name="console"),
     path("employee/", views.employee_portal, name="employee_portal"),
     path("employee/agent-package/", views.employee_agent_package, name="employee_agent_package"),
+    path("employee/complete-setup/", views.employee_complete_password_reset_form, name="employee_complete_password_reset_form"),
     path("api/", include("core.api_urls")),
 ]

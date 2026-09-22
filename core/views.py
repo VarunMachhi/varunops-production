@@ -9,7 +9,7 @@ import logging
 import csv
 import hashlib
 import hmac
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from django.conf import settings
@@ -1830,6 +1830,77 @@ def employee_request_password_otp(request):
     )
     audit(request, "employee.otp_requested", f"Admin-delivered OTP requested for {request.user.username}", "info", machine=profile.assigned_machine)
     return Response({"ok": True, "delivery": "admin", "expires_in_seconds": 600})
+
+
+@login_required
+@require_POST
+def employee_complete_password_reset_form(request):
+    """Browser-native onboarding password completion.
+
+    This endpoint intentionally uses Django's normal form + CSRF flow instead of
+    JavaScript fetch. It keeps the employee signed in after changing their own
+    password and redirects back to the employee workspace with a concise result.
+    """
+    if request.user.is_staff:
+        return redirect("console")
+
+    def back_error(message):
+        query = urlencode({"setup_error": message})
+        return redirect(f"/employee/?{query}")
+
+    profile = employee_profile_for(request.user)
+    if not profile.assigned_machine_id:
+        return back_error("Connect your company PC first.")
+
+    code = str(request.POST.get("otp", "")).strip()
+    new_password = str(request.POST.get("new_password", ""))
+    confirm_password = str(request.POST.get("confirm_password", ""))
+    if not re.fullmatch(r"\d{6}", code):
+        return back_error("Enter the 6-digit OTP.")
+    if new_password != confirm_password:
+        return back_error("Passwords do not match.")
+
+    now = timezone.now()
+    candidates = PasswordResetOTP.objects.filter(
+        user=request.user, used_at__isnull=True, expires_at__gt=now
+    ).order_by("-created_at")[:5]
+    otp = None
+    for candidate in candidates:
+        if candidate.attempts >= 5:
+            continue
+        expected = _admin_otp_code(request.user, candidate)
+        valid = secrets.compare_digest(code, expected) if expected else check_password(code, candidate.code_hash)
+        if valid:
+            otp = candidate
+            break
+        candidate.attempts += 1
+        candidate.save(update_fields=["attempts"])
+
+    if not otp:
+        return back_error("OTP is invalid or expired. Request a new code from IT.")
+
+    try:
+        validate_password(new_password, user=request.user)
+    except ValidationError as exc:
+        return back_error(" ".join(exc.messages))
+
+    # Keep all completion state in one transaction so onboarding cannot become
+    # half-complete if a database write fails.
+    with transaction.atomic():
+        request.user.set_password(new_password)
+        request.user.save(update_fields=["password"])
+        update_session_auth_hash(request, request.user)
+        otp.used_at = now
+        otp.save(update_fields=["used_at"])
+        PasswordResetOTP.objects.filter(user=request.user, used_at__isnull=True).update(used_at=now)
+        profile.onboarding_state = EmployeeProfile.ONBOARD_ACTIVE
+        profile.email_verified_at = now
+        profile.password_changed_at = now
+        profile.save(update_fields=["onboarding_state", "email_verified_at", "password_changed_at", "updated_at"])
+        notify_user(request.user, "Setup complete", "Your IT verification code was accepted and your permanent VarunOps password is active.", "success", "/employee/")
+        audit(request, "employee.password_set", f"{request.user.username} completed secure onboarding", "success", machine=profile.assigned_machine)
+
+    return redirect("/employee/?setup_ok=1")
 
 
 @api_view(["POST"])
