@@ -94,3 +94,7 @@ Employee password setup now uses a server-generated 6-digit OTP shown only to st
 Render now starts VarunOps through `scripts/start_render.sh`. The script prints a clear checkpoint for migrations, Django checks, production-admin bootstrap, and Gunicorn. It also verifies `DATABASE_URL` and `SECRET_KEY` are present without printing secret values.
 
 `bootstrap_production` no longer requires `ADMIN_PASSWORD` on every redeploy when the administrator already exists. `ADMIN_PASSWORD` remains mandatory (minimum 14 characters) for the first admin creation or when `RESET_ADMIN_PASSWORD=1` is explicitly set.
+
+## Automatic endpoint agent updates
+
+After a PC is paired once, normal future VarunOps Agent upgrades do **not** require visiting that PC. Each agent checks the authenticated server manifest every polling cycle. If the deployed server contains a newer agent version, the endpoint downloads the canonical script over HTTPS, verifies the SHA-256 supplied by the authenticated manifest, replaces its local agent, restarts itself, and continues reporting. `UPDATE_EXISTING_AGENT.bat` remains only as a recovery/repair tool.

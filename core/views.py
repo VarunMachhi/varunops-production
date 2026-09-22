@@ -96,6 +96,28 @@ def employee_portal(request):
     return render(request, "core/employee.html")
 
 
+def _agent_release_metadata(request=None):
+    """Return the agent bundled with this deployed VarunOps server.
+
+    Existing endpoints use this metadata to self-update securely.  The SHA-256
+    is calculated from the exact script bytes served by agent_update_script.
+    """
+    path = settings.BASE_DIR / "agent" / "VarunOpsAgent.ps1"
+    raw = path.read_bytes()
+    text = raw.decode("utf-8-sig", errors="replace")
+    match = re.search(r"\$AgentVersion\s*=\s*['\"]([^'\"]+)['\"]", text)
+    version = match.group(1) if match else "0.0.0"
+    url = "/api/agent/update-script/"
+    if request is not None:
+        url = request.build_absolute_uri(url)
+    return {
+        "version": version,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "url": url,
+        "size": len(raw),
+    }
+
+
 @login_required
 def employee_agent_package(request):
     if request.user.is_staff:
@@ -498,6 +520,7 @@ def agent_manifest(request):
     app_policies = {p.app_id: p for p in MachineAppPolicy.objects.filter(machine=machine).select_related("app")}
     policy = machine.network_policy if machine.network_policy_id and machine.network_policy and machine.network_policy.enabled else None
     return Response({
+        "agent_update": _agent_release_metadata(request),
         "apps": [
             {
                 "slug": app.slug,
@@ -529,6 +552,26 @@ def agent_manifest(request):
             "revision": policy.revision,
         } if policy else None),
     })
+
+
+@api_view(["GET"])
+@authentication_classes([AgentKeyAuthentication])
+@permission_classes([IsAuthenticated])
+@throttle_classes([AgentThrottle])
+def agent_update_script(request):
+    """Serve the canonical endpoint agent only to an authenticated device.
+
+    The agent first receives the expected SHA-256 through its authenticated
+    manifest, then verifies the downloaded bytes before replacing itself.
+    """
+    meta = _agent_release_metadata(request)
+    path = settings.BASE_DIR / "agent" / "VarunOpsAgent.ps1"
+    response = FileResponse(open(path, "rb"), content_type="text/plain; charset=utf-8")
+    response["Content-Disposition"] = 'attachment; filename="VarunOpsAgent.ps1"'
+    response["Cache-Control"] = "private, no-store"
+    response["X-VarunOps-Agent-Version"] = meta["version"]
+    response["X-VarunOps-Agent-SHA256"] = meta["sha256"]
+    return response
 
 
 @api_view(["POST"])

@@ -47,6 +47,7 @@ urlpatterns = [
     path("agent/enroll/", views.agent_enroll, name="agent_enroll"),
     path("agent/enroll-pairing/", views.agent_enroll_with_pairing, name="agent_enroll_with_pairing"),
     path("agent/manifest/", views.agent_manifest, name="agent_manifest"),
+    path("agent/update-script/", views.agent_update_script, name="agent_update_script"),
     path("agent/heartbeat/", views.agent_heartbeat, name="agent_heartbeat"),
     path("agent/commands/", views.agent_commands, name="agent_commands"),
     path("agent/commands/<uuid:command_id>/result/", views.agent_command_result, name="agent_command_result"),

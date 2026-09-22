@@ -1,1 +1,3 @@
 EnterpriseUX policy-all + stable device-policy selection
+
+Agent self-update: 4.4.0-autoupdate

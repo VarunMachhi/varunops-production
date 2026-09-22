@@ -2,6 +2,8 @@
 # Runs as SYSTEM from Task Scheduler. No Python runtime is required.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$AgentVersion = '4.4.0-autoupdate'
+$script:RestartForUpdate = $false
 
 $Base = Join-Path $env:ProgramData 'VarunOps'
 $ConfigPath = Join-Path $Base 'agent.json'
@@ -34,7 +36,7 @@ function Save-Config($cfg) {
 
 function Invoke-AgentApi([string]$Path,[string]$Method='GET',$Body=$null,$ExtraHeaders=@{}) {
   $cfg = Load-Config
-  $headers = @{ 'Accept'='application/json'; 'User-Agent'='VarunOps-AgentPS/4.2.3-safe400' }
+  $headers = @{ 'Accept'='application/json'; 'User-Agent'=('VarunOps-AgentPS/'+$AgentVersion) }
   if ($cfg.agent_id -and $cfg.agent_key) {
     $headers['X-Agent-ID'] = [string]$cfg.agent_id
     $headers['X-Agent-Key'] = [string]$cfg.agent_key
@@ -64,6 +66,63 @@ function Invoke-AgentApi([string]$Path,[string]$Method='GET',$Body=$null,$ExtraH
     $message="HTTP $status from $Path"
     if($responseBody){$message += ": $responseBody"}
     throw $message
+  }
+}
+
+function Get-VersionObject([string]$Value) {
+  try {
+    $m=[regex]::Match([string]$Value,'^(\d+)\.(\d+)\.(\d+)')
+    if(-not $m.Success){ return [version]'0.0.0' }
+    return [version]("{0}.{1}.{2}" -f $m.Groups[1].Value,$m.Groups[2].Value,$m.Groups[3].Value)
+  } catch { return [version]'0.0.0' }
+}
+
+function Start-NewAgentAfterUpdate {
+  $target=Join-Path $Base 'VarunOpsAgent.ps1'
+  $restart=Join-Path $Base 'restart_after_update.ps1'
+  $content=@"
+Start-Sleep -Seconds 3
+Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$target`"' -WindowStyle Hidden
+Remove-Item -LiteralPath `$MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+"@
+  Set-Content -Path $restart -Value $content -Encoding UTF8
+  Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$restart) -WindowStyle Hidden | Out-Null
+}
+
+function Check-SelfUpdate($manifest) {
+  if($null -eq $manifest -or $null -eq $manifest.agent_update){ return $false }
+  $remote=[string]$manifest.agent_update.version
+  $url=[string]$manifest.agent_update.url
+  $expected=([string]$manifest.agent_update.sha256).ToLowerInvariant()
+  if(-not $remote -or -not $url -or $expected -notmatch '^[a-f0-9]{64}$'){ return $false }
+  if((Get-VersionObject $remote) -le (Get-VersionObject $AgentVersion)){ return $false }
+
+  $cfg=Load-Config
+  if(-not $cfg.agent_id -or -not $cfg.agent_key){ return $false }
+  if(-not $url.StartsWith(([string]$cfg.server_url).TrimEnd('/')+'/')) { throw 'Agent update URL is not on the configured VarunOps server.' }
+  $headers=@{
+    'Accept'='text/plain'
+    'User-Agent'=('VarunOps-AgentPS/'+$AgentVersion)
+    'X-Agent-ID'=[string]$cfg.agent_id
+    'X-Agent-Key'=[string]$cfg.agent_key
+  }
+  $tmp=Join-Path $Base 'VarunOpsAgent.ps1.download'
+  try {
+    Write-AgentLog ("Agent update available: {0} -> {1}" -f $AgentVersion,$remote)
+    Invoke-WebRequest -Uri $url -Headers $headers -TimeoutSec 60 -UseBasicParsing -OutFile $tmp
+    $actual=(Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash.ToLowerInvariant()
+    if($actual -ne $expected){ throw 'Agent update SHA-256 verification failed.' }
+    $downloaded=Get-Content $tmp -Raw
+    if($downloaded -notmatch [regex]::Escape("`$AgentVersion = '$remote'")){ throw 'Downloaded agent version does not match the authenticated manifest.' }
+    $target=Join-Path $Base 'VarunOpsAgent.ps1'
+    Copy-Item $target (Join-Path $Base 'VarunOpsAgent.ps1.previous') -Force -ErrorAction SilentlyContinue
+    Move-Item $tmp $target -Force
+    Write-AgentLog ("Agent self-update installed: {0}" -f $remote)
+    Start-NewAgentAfterUpdate
+    $script:RestartForUpdate=$true
+    return $true
+  } finally {
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -181,7 +240,7 @@ function Get-SystemInfo {
     resolution=$resolution
     mouse_devices=$mouse
     keyboard_devices=$keyboard
-    agent_version='4.3.1-policyfix'
+    agent_version=$AgentVersion
   }
 }
 
@@ -212,7 +271,7 @@ function Get-SystemInfoCore($FullInfo=$null) {
     motherboard_model=[string]$FullInfo.motherboard_model
     motherboard_serial=[string]$FullInfo.motherboard_serial
     resolution=[string]$FullInfo.resolution
-    agent_version='4.3.1-policyfix'
+    agent_version=$AgentVersion
   }
 }
 
@@ -497,6 +556,7 @@ function Agent-Cycle {
   Ensure-Enrolled
   $cfg=Load-Config
   $manifest=Invoke-AgentApi '/api/agent/manifest/' 'GET'
+  if(Check-SelfUpdate $manifest) { return }
   $policyAck=Apply-NetworkPolicy $manifest.network_policy
 
   # Phase 1: send only conservative JSON-safe core hardware + telemetry.
@@ -581,6 +641,7 @@ $once = ($args -contains '--once') -or $strictOnce
 do {
   try {
     Agent-Cycle
+    if($script:RestartForUpdate) { Write-AgentLog 'Current agent process exiting for self-update restart.'; exit 0 }
     if($strictOnce) { Write-Host 'VarunOps strict sync accepted.' -ForegroundColor Green }
   } catch {
     Write-AgentLog ("Cycle failed: "+$_.Exception.Message)
