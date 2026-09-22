@@ -1,2 +1,1 @@
-VarunOps Pro EnterpriseUX FIXBUTTONS
-Device modal tabs + Add/Edit Software restored
+EnterpriseUX policy-all + stable device-policy selection
