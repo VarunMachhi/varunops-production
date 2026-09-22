@@ -1853,8 +1853,10 @@ def employee_complete_password_reset_form(request):
         return back_error("Connect your company PC first.")
 
     code = str(request.POST.get("otp", "")).strip()
-    new_password = str(request.POST.get("new_password", ""))
-    confirm_password = str(request.POST.get("confirm_password", ""))
+    # Onboarding intentionally uses non-login field names to reduce browser
+    # password-manager heuristics. Keep legacy names as a compatibility fallback.
+    new_password = str(request.POST.get("vops_secret_a") or request.POST.get("new_password", ""))
+    confirm_password = str(request.POST.get("vops_secret_b") or request.POST.get("confirm_password", ""))
     if not re.fullmatch(r"\d{6}", code):
         return back_error("Enter the 6-digit OTP.")
     if new_password != confirm_password:
