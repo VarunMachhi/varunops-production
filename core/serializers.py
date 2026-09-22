@@ -9,7 +9,7 @@ from .models import (
 class AppCatalogSerializer(serializers.ModelSerializer):
     class Meta:
         model = AppCatalog
-        fields = ["slug", "name", "latest_version", "winget_id", "source_type", "installer_url", "installer_sha256", "installer_kind", "install_args", "update_args", "homepage_url", "icon_url", "publisher", "description", "category", "employee_visible", "license_required", "license_notes", "update_notes"]
+        fields = ["slug", "name", "latest_version", "winget_id", "source_type", "installer_url", "installer_sha256", "installer_kind", "github_repo", "github_asset_name", "github_release_tag", "install_args", "update_args", "homepage_url", "icon_url", "publisher", "description", "category", "employee_visible", "license_required", "license_notes", "update_notes"]
 
 
 class InstalledAppSerializer(serializers.ModelSerializer):
@@ -53,7 +53,7 @@ class NetworkPolicySerializer(serializers.ModelSerializer):
     machine_count = serializers.IntegerField(read_only=True, required=False)
     class Meta:
         model = NetworkPolicy
-        fields = ["id", "name", "mode", "allowed_sites", "blocked_sites", "enforce_edge", "enforce_chrome", "enabled", "revision", "machine_count", "updated_at"]
+        fields = ["id", "name", "mode", "allowed_sites", "blocked_sites", "enforce_edge", "enforce_chrome", "strict_browsing", "enabled", "revision", "machine_count", "updated_at"]
 
 
 class MachineAppPolicySerializer(serializers.ModelSerializer):
@@ -72,6 +72,7 @@ class MachineSerializer(serializers.ModelSerializer):
     detected_software = DetectedSoftwareSerializer(many=True, read_only=True)
     app_policies = MachineAppPolicySerializer(many=True, read_only=True)
     network_policy_name = serializers.CharField(source="network_policy.name", allow_null=True, read_only=True)
+    assigned_employee_name = serializers.SerializerMethodField()
     recent_power_events = serializers.SerializerMethodField()
 
     class Meta:
@@ -79,8 +80,14 @@ class MachineSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "branch", "device_type", "ip_address", "os_version",
             "serial_number", "policy", "tags", "system_info", "asset_details", "last_seen",
-            "enrolled_at", "enabled", "online", "installed_apps", "detected_software", "compliance_mode", "network_policy", "network_policy_name", "last_boot_at", "latest_metric", "metrics_updated_at", "agent_live_mode", "unauthorized_software", "app_policies", "recent_power_events",
+            "enrolled_at", "enabled", "online", "installed_apps", "detected_software", "compliance_mode", "network_policy", "network_policy_name", "last_boot_at", "latest_metric", "metrics_updated_at", "agent_live_mode", "unauthorized_software", "app_policies", "assigned_employee_name", "recent_power_events",
         ]
+
+    def get_assigned_employee_name(self, obj):
+        profile = obj.assigned_employees.select_related("user").first()
+        if not profile:
+            return None
+        return profile.user.get_full_name() or profile.user.username
 
     def get_latest_metric(self, obj):
         if obj.live_metrics:

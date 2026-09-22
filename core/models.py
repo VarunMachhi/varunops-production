@@ -57,7 +57,12 @@ class Machine(models.Model):
 class AppCatalog(models.Model):
     SOURCE_WINGET = "winget"
     SOURCE_DIRECT = "direct"
-    SOURCE_CHOICES = [(SOURCE_WINGET, "Winget"), (SOURCE_DIRECT, "Direct HTTPS installer")]
+    SOURCE_GITHUB = "github"
+    SOURCE_CHOICES = [
+        (SOURCE_WINGET, "Winget"),
+        (SOURCE_DIRECT, "Direct HTTPS installer"),
+        (SOURCE_GITHUB, "GitHub Release asset"),
+    ]
     INSTALLER_EXE = "exe"
     INSTALLER_MSI = "msi"
     INSTALLER_CHOICES = [(INSTALLER_EXE, "EXE"), (INSTALLER_MSI, "MSI")]
@@ -70,6 +75,9 @@ class AppCatalog(models.Model):
     installer_url = models.URLField(max_length=1200, blank=True)
     installer_sha256 = models.CharField(max_length=64, blank=True)
     installer_kind = models.CharField(max_length=8, choices=INSTALLER_CHOICES, default=INSTALLER_EXE)
+    github_repo = models.CharField(max_length=180, blank=True)
+    github_asset_name = models.CharField(max_length=220, blank=True)
+    github_release_tag = models.CharField(max_length=120, blank=True)
     install_args = models.JSONField(default=list, blank=True)
     update_args = models.JSONField(default=list, blank=True)
     homepage_url = models.URLField(max_length=600, blank=True)
@@ -379,6 +387,7 @@ class NetworkPolicy(models.Model):
     blocked_sites = models.JSONField(default=list, blank=True)
     enforce_edge = models.BooleanField(default=True)
     enforce_chrome = models.BooleanField(default=True)
+    strict_browsing = models.BooleanField(default=False, help_text="Block common unmanaged browsers from outbound web access; Edge/Chrome remain governed by URL policy.")
     enabled = models.BooleanField(default=True)
     revision = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)

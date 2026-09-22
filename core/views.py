@@ -211,7 +211,7 @@ def _clean_arg_list(value, limit=20):
 
 
 def _direct_installer_valid(app):
-    if app.source_type != AppCatalog.SOURCE_DIRECT:
+    if app.source_type not in {AppCatalog.SOURCE_DIRECT, AppCatalog.SOURCE_GITHUB}:
         return True
     try:
         parsed = urlparse(app.installer_url or "")
@@ -229,9 +229,9 @@ def _app_deployment_error(app, action):
         if app.source_type == AppCatalog.SOURCE_WINGET:
             if not app.winget_id:
                 return "This app uses Winget but no Winget package ID is configured."
-        elif app.source_type == AppCatalog.SOURCE_DIRECT:
+        elif app.source_type in {AppCatalog.SOURCE_DIRECT, AppCatalog.SOURCE_GITHUB}:
             if not _direct_installer_valid(app):
-                return "Direct installer needs an HTTPS URL, installer type, and a 64-character SHA-256 checksum."
+                return "HTTPS/GitHub installer needs an HTTPS URL, installer type, and a 64-character SHA-256 checksum."
         else:
             return "Unsupported installer source."
     if action == Command.ACTION_UNINSTALL and not app.winget_id:
@@ -300,7 +300,7 @@ def bootstrap(request):
     error_id = secrets.token_hex(4)
     try:
         machines = Machine.objects.select_related("network_policy").prefetch_related(
-            "installed_apps__app", "unauthorized_software", "detected_software__catalog_app", "app_policies__app"
+            "installed_apps__app", "unauthorized_software", "detected_software__catalog_app", "app_policies__app", "assigned_employees__user"
         ).all()
         apps = AppCatalog.objects.filter(enabled=True)
         commands = Command.objects.select_related("machine", "app").all()[:100]
@@ -508,6 +508,9 @@ def agent_manifest(request):
                 "installer_url": app.installer_url,
                 "installer_sha256": app.installer_sha256,
                 "installer_kind": app.installer_kind,
+                "github_repo": app.github_repo,
+                "github_asset_name": app.github_asset_name,
+                "github_release_tag": app.github_release_tag,
                 "install_args": app.install_args,
                 "update_args": app.update_args,
                 "detection_names": app.detection_names,
@@ -522,6 +525,7 @@ def agent_manifest(request):
             "id": policy.pk, "name": policy.name, "mode": policy.mode,
             "allowed_sites": policy.allowed_sites, "blocked_sites": policy.blocked_sites,
             "enforce_edge": policy.enforce_edge, "enforce_chrome": policy.enforce_chrome,
+            "strict_browsing": policy.strict_browsing,
             "revision": policy.revision,
         } if policy else None),
     })
@@ -1395,6 +1399,7 @@ def admin_network_policy_save(request):
     obj.blocked_sites = _clean_sites(request.data.get("blocked_sites", []))
     obj.enforce_edge = bool(request.data.get("enforce_edge", True))
     obj.enforce_chrome = bool(request.data.get("enforce_chrome", True))
+    obj.strict_browsing = bool(request.data.get("strict_browsing", False))
     obj.enabled = bool(request.data.get("enabled", True))
     obj.revision = 1 if not policy_id else (obj.revision or 0) + 1
     obj.save()
@@ -1455,6 +1460,130 @@ def admin_unauthorized_action(request, event_id):
         audit(request, "compliance.remove_queue", f"Queued removal of {event.display_name} from {event.machine.name}", "warning", machine=event.machine)
         return Response({"ok": True})
     return Response({"detail": "Action must be allow or uninstall."}, status=400)
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAdminUser])
+def admin_unauthorized_bulk_action(request):
+    ids = request.data.get("event_ids", [])
+    action = str(request.data.get("action", "")).lower()
+    if not isinstance(ids, list) or not ids or len(ids) > 300 or action not in {"allow", "uninstall"}:
+        return Response({"detail": "Select warnings and choose allow or uninstall."}, status=400)
+    try:
+        clean_ids = [int(x) for x in ids]
+    except (TypeError, ValueError):
+        return Response({"detail": "Invalid warning selection."}, status=400)
+    events = list(UnauthorizedSoftware.objects.select_related("machine").filter(pk__in=clean_ids, resolved=False))
+    changed = 0
+    for event in events:
+        if action == "allow":
+            values = list(event.machine.software_exceptions or [])
+            if event.display_name not in values:
+                values.append(event.display_name)
+            event.machine.software_exceptions = values[:300]
+            event.machine.save(update_fields=["software_exceptions"])
+            event.resolved = True
+            event.resolution = "Approved exception by IT (bulk)"
+            event.save(update_fields=["resolved", "resolution"])
+        else:
+            duplicate = AgentTask.objects.filter(machine=event.machine, kind=AgentTask.KIND_UNINSTALL_DETECTED, status__in=[AgentTask.STATUS_QUEUED, AgentTask.STATUS_RUNNING], payload__display_name=event.display_name).exists()
+            if not duplicate:
+                AgentTask.objects.create(machine=event.machine, kind=AgentTask.KIND_UNINSTALL_DETECTED, payload={"display_name": event.display_name}, requested_by=request.user)
+            event.resolution = "Removal queued by IT (bulk)"
+            event.save(update_fields=["resolution"])
+        changed += 1
+    audit(request, "compliance.bulk", f"Bulk {action} applied to {changed} unapproved software alert(s)", "warning", metadata={"count": changed, "action": action})
+    return Response({"updated": changed})
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAdminUser])
+def admin_software_request_bulk_action(request):
+    ids = request.data.get("request_ids", [])
+    decision = str(request.data.get("decision", "")).lower()
+    if not isinstance(ids, list) or not ids or len(ids) > 300 or decision not in {"approve", "reject"}:
+        return Response({"detail": "Select submitted requests and choose approve or reject."}, status=400)
+    try:
+        clean_ids = [uuid.UUID(str(x)) for x in ids]
+    except (TypeError, ValueError, AttributeError):
+        return Response({"detail": "Invalid request selection."}, status=400)
+    updated = 0
+    skipped = []
+    rows = list(SoftwareRequest.objects.select_related("employee", "machine", "app").filter(pk__in=clean_ids, status=SoftwareRequest.STATUS_SUBMITTED))
+    for item in rows:
+        if decision == "reject":
+            item.reviewed_by = request.user
+            item.reviewed_at = timezone.now()
+            item.status = SoftwareRequest.STATUS_REJECTED
+            item.completed_at = timezone.now()
+            item.save(update_fields=["reviewed_by", "reviewed_at", "status", "completed_at"])
+            notify_user(item.employee, "Software request declined", f"IT declined your {item.action} request for {item.app.name}.", "warning", "/employee/#requests")
+            updated += 1
+            continue
+        if item.machine.policy == Machine.POLICY_LOCKED:
+            skipped.append(f"{item.machine.name}/{item.app.name}: machine locked")
+            continue
+        app_policy = MachineAppPolicy.objects.filter(machine=item.machine, app=item.app).first()
+        if app_policy and app_policy.mode == MachineAppPolicy.MODE_BLOCKED and item.action in {SoftwareRequest.ACTION_INSTALL, SoftwareRequest.ACTION_UPDATE}:
+            skipped.append(f"{item.machine.name}/{item.app.name}: blocked by policy")
+            continue
+        if app_policy and app_policy.mode == MachineAppPolicy.MODE_REQUIRED and item.action == SoftwareRequest.ACTION_UNINSTALL:
+            skipped.append(f"{item.machine.name}/{item.app.name}: required by policy")
+            continue
+        installed = InstalledApp.objects.filter(machine=item.machine, app=item.app).first()
+        if item.action == SoftwareRequest.ACTION_UNINSTALL:
+            if not installed:
+                item.status = SoftwareRequest.STATUS_COMPLETED
+                item.completed_at = timezone.now()
+                item.reviewed_by = request.user
+                item.reviewed_at = timezone.now()
+                item.save(update_fields=["status", "completed_at", "reviewed_by", "reviewed_at"])
+                updated += 1
+                continue
+            action = Command.ACTION_UNINSTALL
+        elif item.action == SoftwareRequest.ACTION_UPDATE:
+            if not installed:
+                skipped.append(f"{item.machine.name}/{item.app.name}: not installed")
+                continue
+            if installed.version == item.app.latest_version:
+                item.status = SoftwareRequest.STATUS_COMPLETED
+                item.completed_at = timezone.now()
+                item.reviewed_by = request.user
+                item.reviewed_at = timezone.now()
+                item.save(update_fields=["status", "completed_at", "reviewed_by", "reviewed_at"])
+                updated += 1
+                continue
+            action = Command.ACTION_UPDATE
+        else:
+            if installed:
+                item.status = SoftwareRequest.STATUS_COMPLETED
+                item.completed_at = timezone.now()
+                item.reviewed_by = request.user
+                item.reviewed_at = timezone.now()
+                item.save(update_fields=["status", "completed_at", "reviewed_by", "reviewed_at"])
+                updated += 1
+                continue
+            action = Command.ACTION_INSTALL
+        deploy_error = _app_deployment_error(item.app, action)
+        if deploy_error:
+            skipped.append(f"{item.machine.name}/{item.app.name}: {deploy_error}")
+            continue
+        active = Command.objects.filter(machine=item.machine, app=item.app, action=action, status__in=[Command.STATUS_QUEUED, Command.STATUS_RUNNING]).first()
+        if active and SoftwareRequest.objects.filter(linked_command=active).exists():
+            skipped.append(f"{item.machine.name}/{item.app.name}: linked command already active")
+            continue
+        command = active or Command.objects.create(machine=item.machine, app=item.app, action=action, requested_by=request.user)
+        item.linked_command = command
+        item.reviewed_by = request.user
+        item.reviewed_at = timezone.now()
+        item.status = SoftwareRequest.STATUS_QUEUED
+        item.save(update_fields=["linked_command", "reviewed_by", "reviewed_at", "status"])
+        notify_user(item.employee, "Software request approved", f"{item.app.name} was approved and queued for {item.machine.name}.", "success", "/employee/#requests")
+        updated += 1
+    audit(request, "software_request.bulk", f"Bulk {decision} applied to {updated} software request(s)", "success" if decision=="approve" else "warning", metadata={"count": updated, "decision": decision, "skipped": skipped[:20]})
+    return Response({"updated": updated, "skipped": skipped[:20]})
 
 
 @api_view(["POST"])
@@ -1655,6 +1784,78 @@ def agent_task_result(request, task_id):
     return Response({"ok": True})
 
 
+def _github_latest_release(repo, asset_name):
+    repo = str(repo or "").strip()
+    asset_name = str(asset_name or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}", repo):
+        raise ValueError("GitHub repository must be owner/repository.")
+    if not asset_name or len(asset_name) > 220 or any(ch in asset_name for ch in "\\/\r\n\0"):
+        raise ValueError("Provide the exact GitHub Release asset filename.")
+    url = f"https://api.github.com/repos/{repo}/releases/latest"
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "VarunOps/1.0", "X-GitHub-Api-Version": "2026-03-10"}
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = Request(url, headers=headers)
+    try:
+        with urlopen(req, timeout=12) as response:
+            payload = json.loads(response.read(2_000_000).decode("utf-8"))
+    except HTTPError as exc:
+        raise ValueError(f"GitHub returned HTTP {exc.code}. Public releases work without a token; API rate limits may require GITHUB_TOKEN.") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise ValueError("Could not read the latest GitHub Release.") from exc
+    match = None
+    for asset in payload.get("assets") or []:
+        if str(asset.get("name", "")).casefold() == asset_name.casefold():
+            match = asset
+            break
+    if not match:
+        raise ValueError(f"Asset '{asset_name}' was not found in the latest published release.")
+    download = str(match.get("browser_download_url") or "")
+    if not download.startswith("https://github.com/"):
+        raise ValueError("GitHub did not return a public release download URL.")
+    digest = str(match.get("digest") or "")
+    sha = digest.split(":", 1)[1].lower() if digest.startswith("sha256:") else ""
+    if sha and not re.fullmatch(r"[a-f0-9]{64}", sha):
+        sha = ""
+    return {"version": str(payload.get("tag_name") or "")[:64], "tag": str(payload.get("tag_name") or "")[:120], "installer_url": download[:1200], "sha256": sha, "asset_size": int(match.get("size") or 0)}
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAdminUser])
+def admin_github_resolve(request):
+    try:
+        data = _github_latest_release(request.data.get("github_repo"), request.data.get("github_asset_name"))
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=400)
+    return Response(data)
+
+
+@api_view(["POST"])
+@authentication_classes([SessionAuthentication])
+@permission_classes([IsAdminUser])
+def admin_github_refresh(request):
+    slug = str(request.data.get("slug", "")).strip().lower()[:64]
+    try:
+        app = AppCatalog.objects.get(slug=slug, enabled=True, source_type=AppCatalog.SOURCE_GITHUB)
+    except AppCatalog.DoesNotExist:
+        return Response({"detail": "GitHub-backed app not found."}, status=404)
+    try:
+        data = _github_latest_release(app.github_repo, app.github_asset_name)
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=400)
+    if not data["sha256"]:
+        return Response({"detail": "The latest GitHub asset does not publish a SHA-256 digest. Open Edit, enter the new exact SHA-256 manually, then save."}, status=409)
+    app.latest_version = data["version"] or app.latest_version
+    app.github_release_tag = data["tag"]
+    app.installer_url = data["installer_url"]
+    app.installer_sha256 = data["sha256"]
+    app.save(update_fields=["latest_version", "github_release_tag", "installer_url", "installer_sha256", "updated_at"])
+    audit(request, "catalog.github_refresh", f"Refreshed GitHub release metadata for {app.name}", "success", metadata={"repo": app.github_repo, "tag": app.github_release_tag})
+    return Response(AppCatalogSerializer(app).data)
+
+
 @api_view(["POST"])
 @authentication_classes([SessionAuthentication])
 @permission_classes([IsAdminUser])
@@ -1668,14 +1869,29 @@ def admin_catalog_save(request):
     installer_kind = str(request.data.get("installer_kind", AppCatalog.INSTALLER_EXE)).strip().lower()
     if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,63}", slug) or len(name) < 2:
         return Response({"detail": "Valid app slug and name are required."}, status=400)
-    if source_type not in {AppCatalog.SOURCE_WINGET, AppCatalog.SOURCE_DIRECT}:
-        return Response({"detail": "Installer source must be Winget or Direct HTTPS."}, status=400)
+    if source_type not in {AppCatalog.SOURCE_WINGET, AppCatalog.SOURCE_DIRECT, AppCatalog.SOURCE_GITHUB}:
+        return Response({"detail": "Installer source must be Winget, Direct HTTPS, or GitHub Release."}, status=400)
     if winget_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{1,119}", winget_id):
         return Response({"detail": "Winget package id has an invalid format."}, status=400)
     if installer_kind not in {AppCatalog.INSTALLER_EXE, AppCatalog.INSTALLER_MSI}:
         return Response({"detail": "Installer type must be EXE or MSI."}, status=400)
     if source_type == AppCatalog.SOURCE_WINGET and not winget_id:
         return Response({"detail": "Winget source requires a Winget package ID."}, status=400)
+    github_repo = str(request.data.get("github_repo", "")).strip()[:180]
+    github_asset_name = str(request.data.get("github_asset_name", "")).strip()[:220]
+    github_release_tag = str(request.data.get("github_release_tag", "")).strip()[:120]
+    if source_type == AppCatalog.SOURCE_GITHUB:
+        try:
+            resolved = _github_latest_release(github_repo, github_asset_name)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        installer_url = resolved["installer_url"]
+        github_release_tag = resolved["tag"]
+        resolved_version = resolved["version"]
+        if resolved["sha256"]:
+            installer_sha256 = resolved["sha256"]
+        if not re.fullmatch(r"[a-f0-9]{64}", installer_sha256):
+            return Response({"detail": "GitHub asset has no SHA-256 digest. Enter the exact SHA-256 manually before saving."}, status=400)
     if source_type == AppCatalog.SOURCE_DIRECT:
         try:
             parsed = urlparse(installer_url)
@@ -1690,14 +1906,17 @@ def admin_catalog_save(request):
     app.name = name
     app.winget_id = winget_id
     app.source_type = source_type
-    app.installer_url = installer_url if source_type == AppCatalog.SOURCE_DIRECT else ""
-    app.installer_sha256 = installer_sha256 if source_type == AppCatalog.SOURCE_DIRECT else ""
+    app.installer_url = installer_url if source_type in {AppCatalog.SOURCE_DIRECT, AppCatalog.SOURCE_GITHUB} else ""
+    app.installer_sha256 = installer_sha256 if source_type in {AppCatalog.SOURCE_DIRECT, AppCatalog.SOURCE_GITHUB} else ""
     app.installer_kind = installer_kind
+    app.github_repo = github_repo if source_type == AppCatalog.SOURCE_GITHUB else ""
+    app.github_asset_name = github_asset_name if source_type == AppCatalog.SOURCE_GITHUB else ""
+    app.github_release_tag = github_release_tag if source_type == AppCatalog.SOURCE_GITHUB else ""
     app.install_args = _clean_arg_list(request.data.get("install_args", []))
     app.update_args = _clean_arg_list(request.data.get("update_args", []))
     app.homepage_url = str(request.data.get("homepage_url", "")).strip()[:600]
     app.icon_url = str(request.data.get("icon_url", "")).strip()[:600]
-    app.latest_version = str(request.data.get("latest_version", ""))[:64]
+    app.latest_version = str(locals().get("resolved_version") or request.data.get("latest_version", ""))[:64]
     app.publisher = str(request.data.get("publisher", ""))[:120]
     app.description = str(request.data.get("description", ""))[:1200]
     app.category = str(request.data.get("category", ""))[:80]

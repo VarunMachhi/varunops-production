@@ -1,3 +1,13 @@
+# VarunOps EnterpriseUX 4.3.0
+
+Adds:
+- Strict Browsing Lock: Edge/Chrome URL allowlist plus Windows Firewall blocks for common unmanaged browsers.
+- GitHub Release software source: public release asset resolution, SHA-256 validation, latest-release refresh.
+- Bulk allow/uninstall for unapproved software and bulk approve/reject for employee requests.
+- Full-width device detail tabs; software inventory paginated 10 per page.
+
+Important: Strict Browsing Lock is a free endpoint browsing control, not a complete Secure Web Gateway. It does not claim to filter every arbitrary network-capable process, VPN, or administrator-controlled tunnel.
+
 # IMPORTANT — FIXSYNC build
 
 If an already-connected PC remains on “Finishing first PC scan”, download a fresh connector from the employee portal and run **UPDATE_EXISTING_AGENT.bat as Administrator**. This build migrates legacy EXE scheduled tasks to PowerShell Agent 4.2.1 and only reports SUCCESS after the cloud server accepts fresh hardware + telemetry.

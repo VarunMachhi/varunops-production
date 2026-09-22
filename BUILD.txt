@@ -1,12 +1,2 @@
-VarunOps Pro Onboarding60 FIXSYNC
-Agent: 4.2 PowerShell
-Fix: legacy EXE scheduled-task migration + strict first-sync verification
-
-PATCH: PASSWORD-PROMPT-REDUCTION
-- Employee onboarding password fields use non-login names, autocomplete=off, normal editable fields, autocomplete=new-password, and common password-manager ignore hints.
-- Backend accepts new field names with legacy fallbacks.
-- Note: browser-native save/update prompts remain ultimately controlled by the user browser.
-
-FIXTYPE: Removed readonly password-field workaround so employee can type normally.
-
-FIX: onboarding forms no longer re-render during typing; background refresh is edit-safe.
+VarunOps EnterpriseUX 4.3.0
+Features: strict browsing lock, GitHub Releases software source, bulk approvals, paginated device detail tabs.

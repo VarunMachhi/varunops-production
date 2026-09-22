@@ -181,7 +181,7 @@ function Get-SystemInfo {
     resolution=$resolution
     mouse_devices=$mouse
     keyboard_devices=$keyboard
-    agent_version='4.2.3-safe400'
+    agent_version='4.3.0-enterpriseux'
   }
 }
 
@@ -212,7 +212,7 @@ function Get-SystemInfoCore($FullInfo=$null) {
     motherboard_model=[string]$FullInfo.motherboard_model
     motherboard_serial=[string]$FullInfo.motherboard_serial
     resolution=[string]$FullInfo.resolution
-    agent_version='4.2.3-safe400'
+    agent_version='4.3.0-enterpriseux'
   }
 }
 
@@ -317,16 +317,59 @@ function Set-UrlList([string]$Path,$Values) {
   foreach($v in @($Values)) { New-ItemProperty -Path $Path -Name ([string]$i) -Value ([string]$v) -PropertyType String -Force | Out-Null; $i++ }
 }
 
+function Remove-VarunOpsBrowserBlocks {
+  Get-NetFirewallRule -Group 'VarunOps Strict Browsing' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+}
+
+function Add-BlockedBrowserRule([string]$Path) {
+  if (-not $Path -or -not (Test-Path $Path)) { return }
+  $name = 'VarunOps Block ' + [IO.Path]::GetFileName($Path) + ' ' + ($Path.ToLowerInvariant().GetHashCode().ToString('x8'))
+  if (-not (Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -DisplayName $name -Group 'VarunOps Strict Browsing' -Direction Outbound -Action Block -Program $Path -Profile Any -ErrorAction SilentlyContinue | Out-Null
+  }
+}
+
+function Apply-StrictBrowserLock([bool]$Enabled) {
+  Remove-VarunOpsBrowserBlocks
+  if (-not $Enabled) { return }
+  # Free endpoint mode: managed Edge/Chrome stay available; common unmanaged browsers are denied outbound network access.
+  # This is not a Secure Web Gateway and does not claim to filter every arbitrary network-capable process.
+  $candidates = @(
+    "$env:ProgramFiles\Mozilla Firefox\firefox.exe",
+    "${env:ProgramFiles(x86)}\Mozilla Firefox\firefox.exe",
+    "$env:ProgramFiles\BraveSoftware\Brave-Browser\Application\brave.exe",
+    "${env:ProgramFiles(x86)}\BraveSoftware\Brave-Browser\Application\brave.exe",
+    "$env:ProgramFiles\Vivaldi\Application\vivaldi.exe",
+    "${env:ProgramFiles(x86)}\Vivaldi\Application\vivaldi.exe",
+    "$env:ProgramFiles\Waterfox\waterfox.exe"
+  )
+  $usersRoot = "$env:SystemDrive\Users"
+  if (Test-Path $usersRoot) {
+    foreach($profile in Get-ChildItem $usersRoot -Directory -ErrorAction SilentlyContinue) {
+      $candidates += @(
+        (Join-Path $profile.FullName 'AppData\Local\BraveSoftware\Brave-Browser\Application\brave.exe'),
+        (Join-Path $profile.FullName 'AppData\Local\Programs\Opera\opera.exe'),
+        (Join-Path $profile.FullName 'AppData\Local\Programs\Opera GX\opera.exe'),
+        (Join-Path $profile.FullName 'AppData\Local\Vivaldi\Application\vivaldi.exe'),
+        (Join-Path $profile.FullName 'AppData\Local\Mozilla Firefox\firefox.exe'),
+        (Join-Path $profile.FullName 'AppData\Local\Waterfox\waterfox.exe')
+      )
+    }
+  }
+  foreach($path in @($candidates | Where-Object { $_ } | Select-Object -Unique)) { Add-BlockedBrowserRule $path }
+}
+
 function Apply-NetworkPolicy($policy) {
   $bases=@('HKLM:\SOFTWARE\Policies\Microsoft\Edge','HKLM:\SOFTWARE\Policies\Google\Chrome')
   foreach($b in $bases) { Set-UrlList "$b\URLBlocklist" @(); Set-UrlList "$b\URLAllowlist" @() }
-  if ($null -eq $policy) { return }
+  if ($null -eq $policy) { Apply-StrictBrowserLock $false; return }
   $block=@($policy.blocked_sites); $allow=@()
   if ([string]$policy.mode -eq 'allowlist') { $block=@('*'); $allow=@($policy.allowed_sites) }
   $targets=@()
   if ($policy.enforce_edge) {$targets += 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'}
   if ($policy.enforce_chrome) {$targets += 'HKLM:\SOFTWARE\Policies\Google\Chrome'}
   foreach($b in $targets) { Set-UrlList "$b\URLBlocklist" $block; Set-UrlList "$b\URLAllowlist" $allow }
+  Apply-StrictBrowserLock ([bool]$policy.strict_browsing)
 }
 
 function Ensure-Enrolled {
@@ -390,7 +433,7 @@ function Process-Commands($manifest,[bool]$DryRun) {
     $app=@($manifest.apps | Where-Object { [string]$_.slug -eq [string]$cmd.app.slug }) | Select-Object -First 1
     $result=@{ok=$false;message='App not present in authenticated manifest'}
     if ($app) {
-      if ([string]$app.source_type -eq 'direct') { $result=Invoke-DirectInstaller ([string]$cmd.action) $app $DryRun }
+      if ([string]$app.source_type -in @('direct','github')) { $result=Invoke-DirectInstaller ([string]$cmd.action) $app $DryRun }
       else { $result=Invoke-WingetAction ([string]$cmd.action) ([string]$app.winget_id) $DryRun }
     }
     $ver=''; if ($result.ok -and [string]$cmd.action -ne 'uninstall') {$ver=[string]$app.latest_version}
