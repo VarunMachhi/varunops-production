@@ -2,7 +2,7 @@
   'use strict';
   const content=document.getElementById('employeeContent'), modal=document.getElementById('employeeModal'), modalContent=document.getElementById('employeeModalContent');
   const toastEl=document.getElementById('employeeToast');
-  let state={profile:{},machine:null,onboarding:{state:'pair_device'},apps:[],software_requests:[],tickets:[],notifications:[]}, view='home', loading=false;
+  let state={profile:{},machine:null,onboarding:{state:'pair_device'},apps:[],software_requests:[],tickets:[],notifications:[]}, view='home', loading=false, onboardingEditLock=false;
   const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const csrf=()=>document.querySelector('meta[name="csrf-token"]')?.content||'';
@@ -18,7 +18,8 @@
   function setHead(title,sub,eye='Employee workspace'){document.getElementById('employeeEyebrow').textContent=eye;document.getElementById('employeeTitle').textContent=title;document.getElementById('employeeSubtitle').textContent=sub}
   function navLocked(lock){$$('.nav-item').forEach(b=>{b.disabled=lock;b.style.opacity=lock?'.35':'';b.style.pointerEvents=lock?'none':''})}
 
-  async function refresh(silent=false){if(loading)return;loading=true;try{state=await api('/api/employee/bootstrap/');render()}catch(e){if(!silent)content.innerHTML=empty('Could not load VarunOps',e.message);toast(e.message)}finally{loading=false}}
+  function onboardingFormActive(){const a=document.activeElement;return !!(a&&(a.closest?.('#passwordSetupForm')||a.closest?.('#assetForm')))}
+  async function refresh(silent=false,forceRender=false){if(loading)return;loading=true;try{state=await api('/api/employee/bootstrap/');if(forceRender||(!onboardingEditLock&&!onboardingFormActive()))render()}catch(e){if(!silent&&!onboardingEditLock)content.innerHTML=empty('Could not load VarunOps',e.message);toast(e.message)}finally{loading=false}}
   function showSetupResult(){const u=new URL(window.location.href),err=u.searchParams.get('setup_error'),ok=u.searchParams.get('setup_ok');if(err){setTimeout(()=>toast(err),150);u.searchParams.delete('setup_error');history.replaceState({},'',u.pathname+u.search+u.hash)}else if(ok){setTimeout(()=>toast('Password set. Dashboard unlocked.'),150);u.searchParams.delete('setup_ok');history.replaceState({},'',u.pathname+u.search+u.hash)}}
 
   function autoInventory(m){const i=m?.system_info||{},mon=(i.monitors||[])[0]||{},mouse=(i.mouse_devices||[])[0]||{},kbd=(i.keyboard_devices||[])[0]||{},disk=i.physical_disks||[],ram=i.memory_modules||[],net=i.network_adapters||[];return `
@@ -79,10 +80,11 @@
   function bind(){
     $$('[data-jump]').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.jump;render()}));
     $('#pairCodeBtn')?.addEventListener('click',pairing);
-    $('#assetForm')?.addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/employee/asset-details/',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.currentTarget).entries()))});toast('Asset details saved');await refresh(true)}catch(err){toast(err.message)}});
+    const assetForm=$('#assetForm');assetForm?.addEventListener('input',()=>{onboardingEditLock=true});assetForm?.addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/employee/asset-details/',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.currentTarget).entries()))});onboardingEditLock=false;toast('Asset details saved');await refresh(true,true)}catch(err){toast(err.message)}});
     $('#sendOtpBtn')?.addEventListener('click',async()=>{try{await api('/api/employee/password/request-otp/',{method:'POST',body:'{}'});toast('OTP requested. Ask IT Admin for the 6-digit code.');await refresh(true)}catch(e){toast(e.message)}});
+    const passwordSetupForm=$('#passwordSetupForm');passwordSetupForm?.addEventListener('input',()=>{onboardingEditLock=true});passwordSetupForm?.addEventListener('focusin',()=>{onboardingEditLock=true});passwordSetupForm?.addEventListener('submit',()=>{onboardingEditLock=false});
     // Password completion uses a native Django POST form rather than fetch().
-    // This keeps CSRF handling browser-native and avoids opaque network-level 'Failed to fetch' errors.
+    // While this form is being edited, background telemetry refreshes update state without replacing the DOM.
 
     $$('[data-software]').forEach(b=>b.addEventListener('click',()=>requestSoftware(b.dataset.app,b.dataset.software)));
     $$('[data-cancel-request]').forEach(b=>b.addEventListener('click',async()=>{try{await api(`/api/employee/software-requests/${encodeURIComponent(b.dataset.cancelRequest)}/cancel/`,{method:'POST',body:'{}'});await refresh(true)}catch(e){toast(e.message)}}));
@@ -91,5 +93,5 @@
     $$('[data-notice]').forEach(b=>b.addEventListener('click',async()=>{try{await api(`/api/notifications/${b.dataset.notice}/read/`,{method:'POST',body:'{}'});await refresh(true)}catch(e){toast(e.message)}}));
     $('#profileForm')?.addEventListener('submit',async e=>{e.preventDefault();try{await api('/api/employee/profile/',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.currentTarget).entries()))});toast('Profile saved');await refresh(true)}catch(err){toast(err.message)}})
   }
-  $$('.nav-item').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;render()}));document.getElementById('employeeRefresh').addEventListener('click',()=>refresh());document.getElementById('employeeModalClose').addEventListener('click',closeModal);modal.addEventListener('click',e=>{if(e.target===modal)closeModal()});window.addEventListener('keydown',e=>{if(e.key==='Escape'&&!modal.hidden)closeModal()});const h=location.hash.replace('#','');if(renders[h])view=h;showSetupResult();refresh();setInterval(()=>refresh(true),15000);
+  $$('.nav-item').forEach(b=>b.addEventListener('click',()=>{view=b.dataset.view;render()}));document.getElementById('employeeRefresh').addEventListener('click',()=>refresh(false,true));document.getElementById('employeeModalClose').addEventListener('click',closeModal);modal.addEventListener('click',e=>{if(e.target===modal)closeModal()});window.addEventListener('keydown',e=>{if(e.key==='Escape'&&!modal.hidden)closeModal()});const h=location.hash.replace('#','');if(renders[h])view=h;showSetupResult();refresh();setInterval(()=>refresh(true),15000);
 })();

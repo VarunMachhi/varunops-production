@@ -8,3 +8,5 @@ PATCH: PASSWORD-PROMPT-REDUCTION
 - Note: browser-native save/update prompts remain ultimately controlled by the user browser.
 
 FIXTYPE: Removed readonly password-field workaround so employee can type normally.
+
+FIX: onboarding forms no longer re-render during typing; background refresh is edit-safe.
