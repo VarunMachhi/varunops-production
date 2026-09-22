@@ -78,3 +78,9 @@ Free tiers are not lifetime guarantees and should not be treated as a production
 ## Admin OTP onboarding (no domain/email provider required)
 
 Employee password setup now uses a server-generated 6-digit OTP shown only to staff in **Admin → Employees → Pending verification OTPs**. The employee requests the code after the first verified PC sync. The code expires after 10 minutes and can be attempted at most 5 times. The OTP itself is not stored in plaintext; it is derived from a random one-time token plus Django SECRET_KEY. Permanent employee passwords remain one-way hashed and are never shown to IT.
+
+## FIXSTART deployment hardening
+
+Render now starts VarunOps through `scripts/start_render.sh`. The script prints a clear checkpoint for migrations, Django checks, production-admin bootstrap, and Gunicorn. It also verifies `DATABASE_URL` and `SECRET_KEY` are present without printing secret values.
+
+`bootstrap_production` no longer requires `ADMIN_PASSWORD` on every redeploy when the administrator already exists. `ADMIN_PASSWORD` remains mandatory (minimum 14 characters) for the first admin creation or when `RESET_ADMIN_PASSWORD=1` is explicitly set.

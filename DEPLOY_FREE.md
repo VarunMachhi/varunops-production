@@ -28,3 +28,9 @@ OTP expires after 10 minutes. No email service, Resend account, SMTP server, or 
 ## Deploy update
 
 Push the project to the same GitHub repository, then use **Render → Deploy latest commit**. Database migrations still run through the existing Render build/start flow.
+
+## Required Render environment variables (FIXSTART)
+
+For an existing deployment, keep `DATABASE_URL` and `SECRET_KEY` configured. `ADMIN_PASSWORD` is mandatory for the first administrator creation, but after that the same administrator can survive normal redeploys even if the variable is not re-read. Keep it configured unless you intentionally manage it another way.
+
+The Render start command is now `bash scripts/start_render.sh`, which logs exactly which startup phase fails.
