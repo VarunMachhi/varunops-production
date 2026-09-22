@@ -2,8 +2,9 @@
 # Runs as SYSTEM from Task Scheduler. No Python runtime is required.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$AgentVersion = '4.4.4-defenderfriendly'
+$AgentVersion = '4.5.0-recovery'
 $script:RestartForUpdate = $false
+$script:RestartForSupervisor = $false
 $PolicyPollSeconds = 5
 
 $Base = Join-Path $env:ProgramData 'VarunOps'
@@ -139,28 +140,74 @@ function Check-SelfUpdate($manifest) {
 
 function Ensure-AgentTaskHealthy {
   try {
-    $target=Join-Path $Base 'VarunOpsAgent.ps1'
-    $task=Get-ScheduledTask -TaskName 'VarunOps Agent' -ErrorAction SilentlyContinue
-    $needsRepair=$false
-    if($null -eq $task){ $needsRepair=$true }
-    else {
-      $a=$task.Actions | Select-Object -First 1
-      $actionText=([string]$a.Execute)+' '+([string]$a.Arguments)
-      if($actionText -notmatch 'VarunOpsAgent\.ps1'){ $needsRepair=$true }
-      # Older builds used only an AtStartup trigger. Repair them once so the
-      # scheduler can relaunch the persistent agent if it ever exits.
-      if(@($task.Triggers).Count -lt 2){ $needsRepair=$true }
-    }
-    if($needsRepair){
-      $action=New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$target`""
-      $startup=New-ScheduledTaskTrigger -AtStartup
-      $watch=New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
-      $settings=New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 10 -RestartInterval (New-TimeSpan -Seconds 30) -ExecutionTimeLimit (New-TimeSpan -Days 3650) -MultipleInstances IgnoreNew
-      Register-ScheduledTask -TaskName 'VarunOps Agent' -Action $action -Trigger @($startup,$watch) -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
-      Write-AgentLog 'Scheduled task self-healed with startup + watchdog trigger.'
+    $watchdog=Join-Path $Base 'VarunOpsWatchdog.exe'
+    if(-not (Test-Path $watchdog)){ return }
+    $tasks=@(
+      @{Name='VarunOps Watchdog';Schedule='ONSTART'},
+      @{Name='VarunOps Watchdog Recovery';Schedule='MINUTE'}
+    )
+    foreach($t in $tasks){
+      $existing=Get-ScheduledTask -TaskName $t.Name -ErrorAction SilentlyContinue
+      $bad=$false
+      if($null -eq $existing){$bad=$true}
+      else {
+        $a=$existing.Actions | Select-Object -First 1
+        if(([string]$a.Execute) -notlike '*VarunOpsWatchdog.exe*'){$bad=$true}
+      }
+      if($bad){
+        try{Unregister-ScheduledTask -TaskName $t.Name -Confirm:$false -ErrorAction SilentlyContinue}catch{}
+        $action=New-ScheduledTaskAction -Execute $watchdog
+        if($t.Schedule -eq 'ONSTART'){
+          $trigger=New-ScheduledTaskTrigger -AtStartup
+        } else {
+          $trigger=New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
+        }
+        $settings=New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 5 -RestartInterval (New-TimeSpan -Seconds 30) -ExecutionTimeLimit (New-TimeSpan -Days 3650) -MultipleInstances IgnoreNew
+        Register-ScheduledTask -TaskName $t.Name -Action $action -Trigger $trigger -Settings $settings -User 'SYSTEM' -RunLevel Highest -Force | Out-Null
+      }
     }
   } catch {
-    Write-AgentLog ('Scheduled task health warning: '+$_.Exception.Message)
+    Write-AgentLog ('Watchdog task health warning: '+$_.Exception.Message)
+  }
+}
+
+function Ensure-WatchdogSupervisor($manifest) {
+  try {
+    if($null -eq $manifest -or $null -eq $manifest.watchdog_update){ return $false }
+    $meta=$manifest.watchdog_update
+    $url=[string]$meta.url
+    $expected=([string]$meta.sha256).ToLowerInvariant()
+    if(-not $url -or $expected -notmatch '^[a-f0-9]{64}$'){ return $false }
+    $cfg=Load-Config
+    if(-not $cfg.agent_id -or -not $cfg.agent_key){ return $false }
+    if(-not $url.StartsWith(([string]$cfg.server_url).TrimEnd('/')+'/')){ throw 'Watchdog update URL is not on the configured VarunOps server.' }
+    $target=Join-Path $Base 'VarunOpsWatchdog.exe'
+    $needs=$true
+    if(Test-Path $target){
+      try{$current=(Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant(); if($current -eq $expected){$needs=$false}}catch{}
+    }
+    if($needs){
+      $tmp=Join-Path $Base 'VarunOpsWatchdog.exe.download'
+      $headers=@{'Accept'='application/octet-stream';'User-Agent'=('VarunOps-AgentPS/'+$AgentVersion);'X-Agent-ID'=[string]$cfg.agent_id;'X-Agent-Key'=[string]$cfg.agent_key}
+      Write-AgentLog 'Installing/updating VarunOps watchdog supervisor.'
+      Invoke-WebRequest -Uri $url -Headers $headers -TimeoutSec 60 -UseBasicParsing -OutFile $tmp
+      $actual=(Get-FileHash -Algorithm SHA256 -LiteralPath $tmp).Hash.ToLowerInvariant()
+      if($actual -ne $expected){Remove-Item $tmp -Force -ErrorAction SilentlyContinue; throw 'Watchdog SHA-256 verification failed.'}
+      Move-Item $tmp $target -Force
+    }
+    Ensure-AgentTaskHealthy
+    try{Start-ScheduledTask -TaskName 'VarunOps Watchdog' -ErrorAction SilentlyContinue}catch{}
+    if($needs){
+      # Let the supervisor own the next persistent process. It will retry while
+      # this process is still holding the singleton mutex, then take over after exit.
+      $script:RestartForSupervisor=$true
+      Write-AgentLog 'Watchdog supervisor installed. Current agent will hand over supervision.'
+      return $true
+    }
+    return $false
+  } catch {
+    Write-AgentLog ('Watchdog supervisor warning: '+$_.Exception.Message)
+    return $false
   }
 }
 
@@ -666,6 +713,7 @@ function Agent-Cycle {
   $cfg=Load-Config
   $manifest=Invoke-AgentApi '/api/agent/manifest/' 'GET'
   if(Check-SelfUpdate $manifest) { return }
+  if(Ensure-WatchdogSupervisor $manifest) { return }
   $policyAck=Sync-NetworkPolicyFast $true
 
   # Phase 1: send only conservative JSON-safe core hardware + telemetry.
@@ -754,6 +802,7 @@ if($once){
   try {
     Agent-Cycle
     if($script:RestartForUpdate){ Write-AgentLog 'Current agent process exiting for self-update restart.'; exit 0 }
+    if($script:RestartForSupervisor){ Write-AgentLog 'Current agent process exiting for watchdog handover.'; exit 0 }
     if($strictOnce){ Write-Host 'VarunOps strict sync accepted.' -ForegroundColor Green }
     exit 0
   } catch {
@@ -770,6 +819,7 @@ do {
     if($now -ge $nextFull){
       Agent-Cycle
       if($script:RestartForUpdate){ Write-AgentLog 'Current agent process exiting for self-update restart.'; exit 0 }
+      if($script:RestartForSupervisor){ Write-AgentLog 'Current agent process exiting for watchdog handover.'; exit 0 }
       try{$cfg=Load-Config;$seconds=[Math]::Max(30,[Math]::Min(300,[int]$cfg.poll_seconds))}catch{$seconds=60}
       $nextFull=(Get-Date).ToUniversalTime().AddSeconds($seconds)
     } else {

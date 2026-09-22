@@ -1,6 +1,9 @@
-VarunOps Pro 4.4.3 PresenceFast
-- 5s live policy poll
-- policy-state doubles as presence heartbeat
-- 30s online threshold
-- scheduled-task watchdog + self-heal
-- self-update restarts through Task Scheduler
+VarunOps Pro 4.5.0 Recovery Supervisor
+- 5s live policy poll and presence heartbeat
+- 30s agent-online threshold
+- Windows watchdog EXE supervises the PowerShell endpoint agent
+- watchdog relaunches agent within seconds after crash/self-update
+- Task Scheduler startup + 1-minute watchdog recovery tasks
+- authenticated SHA-256 watchdog/agent self-update metadata
+- UI distinguishes Agent offline from physical PC power state
+- policy OFF waits for agent when endpoint is unavailable

@@ -52,6 +52,7 @@ urlpatterns = [
     path("agent/policy-state/", views.agent_policy_state, name="agent_policy_state"),
     path("agent/policy-ack/", views.agent_policy_ack, name="agent_policy_ack"),
     path("agent/update-script/", views.agent_update_script, name="agent_update_script"),
+    path("agent/update-watchdog/", views.agent_update_watchdog, name="agent_update_watchdog"),
     path("agent/heartbeat/", views.agent_heartbeat, name="agent_heartbeat"),
     path("agent/commands/", views.agent_commands, name="agent_commands"),
     path("agent/commands/<uuid:command_id>/result/", views.agent_command_result, name="agent_command_result"),

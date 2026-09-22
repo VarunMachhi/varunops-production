@@ -118,6 +118,21 @@ def _agent_release_metadata(request=None):
     }
 
 
+def _watchdog_release_metadata(request=None):
+    """Return the small Windows watchdog bundled with this server."""
+    path = settings.BASE_DIR / "agent" / "VarunOpsWatchdog.exe"
+    raw = path.read_bytes()
+    url = "/api/agent/update-watchdog/"
+    if request is not None:
+        url = request.build_absolute_uri(url)
+    return {
+        "version": "1.0.0",
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "url": url,
+        "size": len(raw),
+    }
+
+
 @login_required
 def employee_agent_package(request):
     # Build the Windows connector without separate installer PowerShell helper files.
@@ -125,7 +140,7 @@ def employee_agent_package(request):
         return JsonResponse({"detail": "Staff accounts use the admin console."}, status=403)
     base_url = request.build_absolute_uri("/").rstrip("/")
     agent_dir = settings.BASE_DIR / "agent"
-    files = ["VarunOpsAgent.ps1", "CHECK_AGENT.bat", "CHECK_WEB_POLICY.bat"]
+    files = ["VarunOpsAgent.ps1", "VarunOpsWatchdog.exe", "CHECK_AGENT.bat", "CHECK_WEB_POLICY.bat"]
     for name in files:
         if not (agent_dir / name).exists():
             return JsonResponse({"detail": f"Agent package is missing {name}."}, status=500)
@@ -153,6 +168,7 @@ set "VOPS_SERVER=__SERVER__"
 set "VOPS_BASE=%ProgramData%\VarunOps"
 if not exist "%VOPS_BASE%" mkdir "%VOPS_BASE%"
 copy /y "%~dp0VarunOpsAgent.ps1" "%VOPS_BASE%\VarunOpsAgent.ps1" >nul || goto :bad
+copy /y "%~dp0VarunOpsWatchdog.exe" "%VOPS_BASE%\VarunOpsWatchdog.exe" >nul || goto :bad
 
 rem Build config from environment variables instead of running an installer PowerShell script.
 powershell.exe -NoLogo -NoProfile -Command "$o=[ordered]@{server_url=$env:VOPS_SERVER;pairing_code=$env:VOPS_CODE;branch=$env:VOPS_BRANCH;device_type='Desktop';poll_seconds=60}; $o|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $env:VOPS_BASE 'agent.json') -Encoding UTF8" || goto :bad
@@ -161,7 +177,7 @@ icacls "%VOPS_BASE%" /inheritance:r >nul
 icacls "%VOPS_BASE%" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" >nul
 call :tasks || goto :bad
 powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%VOPS_BASE%\VarunOpsAgent.ps1" --once-strict || goto :bad
-schtasks /Run /TN "VarunOps Agent" >nul 2>&1
+schtasks /Run /TN "VarunOps Watchdog" >nul 2>&1
 
 echo.
 echo PC connected to VarunOps successfully.
@@ -172,9 +188,10 @@ exit /b 0
 :tasks
 schtasks /Delete /TN "VarunOps Agent" /F >nul 2>&1
 schtasks /Delete /TN "VarunOps Agent Watchdog" /F >nul 2>&1
-schtasks /Create /TN "VarunOps Agent" /TR "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%VOPS_BASE%\VarunOpsAgent.ps1\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F >nul || exit /b 1
-rem Watchdog launches the same singleton agent once a minute; extra instances exit immediately.
-schtasks /Create /TN "VarunOps Agent Watchdog" /TR "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%VOPS_BASE%\VarunOpsAgent.ps1\"" /SC MINUTE /MO 1 /RU SYSTEM /RL HIGHEST /F >nul || exit /b 1
+schtasks /Delete /TN "VarunOps Watchdog" /F >nul 2>&1
+schtasks /Delete /TN "VarunOps Watchdog Recovery" /F >nul 2>&1
+schtasks /Create /TN "VarunOps Watchdog" /TR "%VOPS_BASE%\VarunOpsWatchdog.exe" /SC ONSTART /RU SYSTEM /RL HIGHEST /F >nul || exit /b 1
+schtasks /Create /TN "VarunOps Watchdog Recovery" /TR "%VOPS_BASE%\VarunOpsWatchdog.exe" /SC MINUTE /MO 1 /RU SYSTEM /RL HIGHEST /F >nul || exit /b 1
 exit /b 0
 
 :bad
@@ -194,15 +211,18 @@ if %errorlevel% neq 0 (
 set "VOPS_BASE=%ProgramData%\VarunOps"
 if not exist "%VOPS_BASE%\agent.json" goto :missing
 copy /y "%~dp0VarunOpsAgent.ps1" "%VOPS_BASE%\VarunOpsAgent.ps1" >nul || goto :bad
+copy /y "%~dp0VarunOpsWatchdog.exe" "%VOPS_BASE%\VarunOpsWatchdog.exe" >nul || goto :bad
 icacls "%VOPS_BASE%" /inheritance:r >nul
 icacls "%VOPS_BASE%" /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" >nul
 
 schtasks /Delete /TN "VarunOps Agent" /F >nul 2>&1
 schtasks /Delete /TN "VarunOps Agent Watchdog" /F >nul 2>&1
-schtasks /Create /TN "VarunOps Agent" /TR "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%VOPS_BASE%\VarunOpsAgent.ps1\"" /SC ONSTART /RU SYSTEM /RL HIGHEST /F >nul || goto :bad
-schtasks /Create /TN "VarunOps Agent Watchdog" /TR "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%VOPS_BASE%\VarunOpsAgent.ps1\"" /SC MINUTE /MO 1 /RU SYSTEM /RL HIGHEST /F >nul || goto :bad
+schtasks /Delete /TN "VarunOps Watchdog" /F >nul 2>&1
+schtasks /Delete /TN "VarunOps Watchdog Recovery" /F >nul 2>&1
+schtasks /Create /TN "VarunOps Watchdog" /TR "%VOPS_BASE%\VarunOpsWatchdog.exe" /SC ONSTART /RU SYSTEM /RL HIGHEST /F >nul || goto :bad
+schtasks /Create /TN "VarunOps Watchdog Recovery" /TR "%VOPS_BASE%\VarunOpsWatchdog.exe" /SC MINUTE /MO 1 /RU SYSTEM /RL HIGHEST /F >nul || goto :bad
 powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%VOPS_BASE%\VarunOpsAgent.ps1" --once-strict || goto :bad
-schtasks /Run /TN "VarunOps Agent" >nul 2>&1
+schtasks /Run /TN "VarunOps Watchdog" >nul 2>&1
 
 echo.
 echo Agent repaired, synced and restarted successfully.
@@ -230,7 +250,7 @@ NEW PC
 4. Run CONNECT_THIS_PC.bat as Administrator and enter the code.
 
 EXISTING VARUNOPS PC
-Run UPDATE_EXISTING_AGENT.bat as Administrator. It keeps the existing device identity, replaces the agent file, verifies a strict cloud sync, and restores the Task Scheduler watchdog.
+Run RECOVER_VARUNOPS.bat (or UPDATE_EXISTING_AGENT.bat) as Administrator. It keeps the existing device identity, restores the watchdog supervisor, verifies a strict cloud sync, and then future restarts/updates recover automatically.
 
 WINDOWS SECURITY
 VarunOps changes enterprise browser policy, inventories hardware/software, and runs as a SYSTEM scheduled task. Those are privileged endpoint-management behaviors. Do not disable Microsoft Defender globally. If Windows Security blocks a connector file, review Protection History for the exact detection and submit a suspected false positive to Microsoft before creating any exclusion.
@@ -241,6 +261,7 @@ VarunOps changes enterprise browser policy, inventories hardware/software, and r
             zf.write(agent_dir / name, arcname=name)
         zf.writestr("CONNECT_THIS_PC.bat", bat)
         zf.writestr("UPDATE_EXISTING_AGENT.bat", update_bat)
+        zf.writestr("RECOVER_VARUNOPS.bat", update_bat)
         zf.writestr("README.txt", readme)
     buffer.seek(0)
     response = FileResponse(buffer, as_attachment=True, filename="VarunOps-PC-Connector.zip")
@@ -681,6 +702,7 @@ def agent_manifest(request):
     assignment, policy = _network_policy_assignment(machine)
     return Response({
         "agent_update": _agent_release_metadata(request),
+        "watchdog_update": _watchdog_release_metadata(request),
         "apps": [
             {
                 "slug": app.slug,
@@ -726,6 +748,22 @@ def agent_update_script(request):
     response["Cache-Control"] = "private, no-store"
     response["X-VarunOps-Agent-Version"] = meta["version"]
     response["X-VarunOps-Agent-SHA256"] = meta["sha256"]
+    return response
+
+
+@api_view(["GET"])
+@authentication_classes([AgentKeyAuthentication])
+@permission_classes([IsAuthenticated])
+@throttle_classes([AgentThrottle])
+def agent_update_watchdog(request):
+    """Serve the authenticated Windows watchdog binary."""
+    meta = _watchdog_release_metadata(request)
+    path = settings.BASE_DIR / "agent" / "VarunOpsWatchdog.exe"
+    response = FileResponse(open(path, "rb"), content_type="application/octet-stream")
+    response["Content-Disposition"] = 'attachment; filename="VarunOpsWatchdog.exe"'
+    response["Cache-Control"] = "private, no-store"
+    response["X-VarunOps-Watchdog-Version"] = meta["version"]
+    response["X-VarunOps-Watchdog-SHA256"] = meta["sha256"]
     return response
 
 
@@ -1148,6 +1186,7 @@ def employee_bootstrap(request):
         "tickets": SupportTicketSerializer(tickets, many=True).data,
         "notifications": NotificationSerializer(notifications, many=True).data,
         "agent_update": _agent_release_metadata(request),
+        "watchdog_update": _watchdog_release_metadata(request),
     })
 
 
