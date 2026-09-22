@@ -2,7 +2,7 @@
 # Runs as SYSTEM from Task Scheduler. No Python runtime is required.
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$AgentVersion = '4.5.0-recovery'
+$AgentVersion = '4.5.1-policyrefresh'
 $script:RestartForUpdate = $false
 $script:RestartForSupervisor = $false
 $PolicyPollSeconds = 5
@@ -532,43 +532,136 @@ function Get-UrlListValues([string]$Path) {
   return @($rows)
 }
 
+function Get-RegistryListNative([string]$SubKey,[string]$View) {
+  $reg = Join-Path $env:SystemRoot 'System32\reg.exe'
+  if(-not (Test-Path $reg)){ $reg='reg.exe' }
+  $args=@('query',('HKLM\'+$SubKey))
+  if($View -eq '32'){$args += '/reg:32'}else{$args += '/reg:64'}
+  $out=& $reg @args 2>$null
+  if($LASTEXITCODE -ne 0){ return @() }
+  $rows=@()
+  foreach($line in @($out)){
+    if($line -match '^\s*(\d+)\s+REG_SZ\s+(.*)$'){$rows += [pscustomobject]@{Index=[int]$matches[1];Value=[string]$matches[2]}}
+  }
+  return @($rows | Sort-Object Index | ForEach-Object {$_.Value})
+}
+
+function Remove-UrlListNative([string]$SubKey) {
+  $reg = Join-Path $env:SystemRoot 'System32\reg.exe'
+  if(-not (Test-Path $reg)){ $reg='reg.exe' }
+  foreach($view in @('64','32')){
+    & $reg delete ('HKLM\'+$SubKey) /f ("/reg:$view") *> $null
+  }
+}
+
+function Set-UrlListNative([string]$SubKey,$Values) {
+  Remove-UrlListNative $SubKey
+  $clean=@($Values | ForEach-Object {[string]$_} | Where-Object {$_})
+  if($clean.Count -eq 0){ return }
+  $reg = Join-Path $env:SystemRoot 'System32\reg.exe'
+  if(-not (Test-Path $reg)){ $reg='reg.exe' }
+  foreach($view in @('64','32')){
+    $i=1
+    foreach($v in $clean){
+      & $reg add ('HKLM\'+$SubKey) /v ([string]$i) /t REG_SZ /d ([string]$v) /f ("/reg:$view") *> $null
+      if($LASTEXITCODE -ne 0){ throw "Failed writing $SubKey view $view" }
+      $i++
+    }
+  }
+}
+
+function Get-ManagedBrowserExecutables {
+  $paths=@(
+    "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+    "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+    "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
+    "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+    "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+    "$env:LOCALAPPDATA\Microsoft\Edge\Application\msedge.exe"
+  )
+  return @($paths | Where-Object {$_ -and (Test-Path $_)} | Select-Object -Unique)
+}
+
+function Request-BrowserPolicyRefresh {
+  try {
+    $user=[string](Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+    if([string]::IsNullOrWhiteSpace($user)){ Write-AgentLog 'Browser policy refresh skipped: no interactive user.'; return $false }
+    $executables=@(Get-ManagedBrowserExecutables)
+    if($executables.Count -eq 0){ Write-AgentLog 'Browser policy refresh skipped: Chrome/Edge executable not found.'; return $false }
+    $principal=New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+    $settings=New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
+    $ran=$false
+    $n=0
+    foreach($exe in $executables){
+      $procName=[IO.Path]::GetFileNameWithoutExtension($exe)
+      if(-not (Get-Process -Name $procName -ErrorAction SilentlyContinue)){ continue }
+      $n++
+      $taskName="VarunOps Browser Policy Refresh $n"
+      try{
+        $action=New-ScheduledTaskAction -Execute $exe -Argument '--refresh-platform-policy'
+        $trigger=New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(5))
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+        Start-ScheduledTask -TaskName $taskName
+        Start-Sleep -Milliseconds 700
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        $ran=$true
+      } catch {
+        Write-AgentLog ("Browser policy refresh warning for {0}: {1}" -f $exe,$_.Exception.Message)
+        try{Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue}catch{}
+      }
+    }
+    if($ran){ Write-AgentLog 'Requested immediate Chromium platform policy refresh in the signed-in user session.' }
+    return $ran
+  } catch {
+    Write-AgentLog ('Browser policy refresh warning: '+$_.Exception.Message)
+    return $false
+  }
+}
+
 function Apply-NetworkPolicy($policy) {
-  $bases=@('HKLM:\SOFTWARE\Policies\Microsoft\Edge','HKLM:\SOFTWARE\Policies\Google\Chrome')
-  # Always clear VarunOps-owned URL list keys first so OFF/edit/delete never leaves stale rules.
-  foreach($b in $bases) { Set-UrlList "$b\URLBlocklist" @(); Set-UrlList "$b\URLAllowlist" @() }
+  $bases=@('SOFTWARE\Policies\Microsoft\Edge','SOFTWARE\Policies\Google\Chrome')
+  # Always clear both native registry views first. This prevents stale platform policies
+  # from surviving an OFF/edit/delete transition on 64-bit Windows.
+  foreach($b in $bases) { Remove-UrlListNative "$b\URLBlocklist"; Remove-UrlListNative "$b\URLAllowlist" }
   if ($null -eq $policy) {
     Apply-StrictBrowserLock $false
     try { Clear-DnsClientCache -ErrorAction SilentlyContinue | Out-Null } catch {}
     $verified=$true
     foreach($b in $bases){
-      if(@(Get-UrlListValues "$b\URLBlocklist").Count -gt 0){$verified=$false}
-      if(@(Get-UrlListValues "$b\URLAllowlist").Count -gt 0){$verified=$false}
+      foreach($view in @('64','32')){
+        if(@(Get-RegistryListNative "$b\URLBlocklist" $view).Count -gt 0){$verified=$false}
+        if(@(Get-RegistryListNative "$b\URLAllowlist" $view).Count -gt 0){$verified=$false}
+      }
     }
     try { if(@(Get-NetFirewallRule -Group 'VarunOps Strict Browsing' -ErrorAction SilentlyContinue).Count -gt 0){$verified=$false} } catch {}
-    Write-AgentLog ("Network policy removed: verified={0}" -f $verified)
-    return @{id='';revision=0;verified=[bool]$verified;rules=@()}
+    $refreshRequested=Request-BrowserPolicyRefresh
+    Write-AgentLog ("Network policy removed: registry_verified={0} refresh_requested={1}" -f $verified,$refreshRequested)
+    return @{id='';revision=0;verified=[bool]$verified;rules=@();browser_refresh_requested=[bool]$refreshRequested}
   }
   $block=@($policy.blocked_sites | ForEach-Object { Normalize-UrlPolicyRule ([string]$_) } | Where-Object { $_ })
   $allow=@($policy.allowed_sites | ForEach-Object { Normalize-UrlPolicyRule ([string]$_) } | Where-Object { $_ })
   if ([string]$policy.mode -eq 'allowlist') { $block=@('*') }
   else { $allow=@() }
   $targets=@()
-  if ($policy.enforce_edge) {$targets += 'HKLM:\SOFTWARE\Policies\Microsoft\Edge'}
-  if ($policy.enforce_chrome) {$targets += 'HKLM:\SOFTWARE\Policies\Google\Chrome'}
-  foreach($b in $targets) { Set-UrlList "$b\URLBlocklist" $block; Set-UrlList "$b\URLAllowlist" $allow }
+  if ($policy.enforce_edge) {$targets += 'SOFTWARE\Policies\Microsoft\Edge'}
+  if ($policy.enforce_chrome) {$targets += 'SOFTWARE\Policies\Google\Chrome'}
+  foreach($b in $targets) { Set-UrlListNative "$b\URLBlocklist" $block; Set-UrlListNative "$b\URLAllowlist" $allow }
   Apply-StrictBrowserLock ([bool]$policy.strict_browsing)
   try { Clear-DnsClientCache -ErrorAction SilentlyContinue | Out-Null } catch {}
   $verified=$true
   foreach($b in $bases){
     $expectedBlock=$(if($targets -contains $b){@($block)}else{@()})
     $expectedAllow=$(if($targets -contains $b){@($allow)}else{@()})
-    $actualBlock=@(Get-UrlListValues "$b\URLBlocklist")
-    $actualAllow=@(Get-UrlListValues "$b\URLAllowlist")
-    if(@(Compare-Object -ReferenceObject @($expectedBlock) -DifferenceObject @($actualBlock)).Count -gt 0){ $verified=$false }
-    if(@(Compare-Object -ReferenceObject @($expectedAllow) -DifferenceObject @($actualAllow)).Count -gt 0){ $verified=$false }
+    foreach($view in @('64','32')){
+      $actualBlock=@(Get-RegistryListNative "$b\URLBlocklist" $view)
+      $actualAllow=@(Get-RegistryListNative "$b\URLAllowlist" $view)
+      if(@(Compare-Object -ReferenceObject @($expectedBlock) -DifferenceObject @($actualBlock)).Count -gt 0){ $verified=$false }
+      if(@(Compare-Object -ReferenceObject @($expectedAllow) -DifferenceObject @($actualAllow)).Count -gt 0){ $verified=$false }
+    }
   }
-  Write-AgentLog ("Network policy applied: id={0} rev={1} verified={2} block=[{3}]" -f $policy.id,$policy.revision,$verified,($block -join ','))
-  return @{id=[string]$policy.id;revision=[int]$policy.revision;verified=[bool]$verified;rules=@($block)}
+  $refreshRequested=Request-BrowserPolicyRefresh
+  Write-AgentLog ("Network policy applied: id={0} rev={1} registry_verified={2} refresh_requested={3} block=[{4}]" -f $policy.id,$policy.revision,$verified,$refreshRequested,($block -join ','))
+  return @{id=[string]$policy.id;revision=[int]$policy.revision;verified=[bool]$verified;rules=@($block);browser_refresh_requested=[bool]$refreshRequested}
 }
 
 function Sync-NetworkPolicyFast([bool]$Force=$false) {
