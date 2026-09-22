@@ -546,7 +546,9 @@ def agent_manifest(request):
         "live_actions": machine.agent_live_mode,
         "network_policy": ({
             "id": policy.pk, "name": policy.name, "mode": policy.mode,
-            "allowed_sites": policy.allowed_sites, "blocked_sites": policy.blocked_sites,
+            # Always normalize again at delivery time so even policies created by older
+            # VarunOps builds are safe for Chrome/Edge URLBlocklist parsing.
+            "allowed_sites": _clean_sites(policy.allowed_sites), "blocked_sites": _clean_sites(policy.blocked_sites),
             "enforce_edge": policy.enforce_edge, "enforce_chrome": policy.enforce_chrome,
             "strict_browsing": policy.strict_browsing,
             "revision": policy.revision,
