@@ -7,3 +7,4 @@ staticfiles/
 agent/agent.json
 
 private_media/
+agent/install_agent.ps1
