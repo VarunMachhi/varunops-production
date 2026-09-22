@@ -29,3 +29,7 @@ Deploy the project to Render. Connected 4.4.0+ endpoints will discover it on the
 Agents older than 4.4.0 do not contain the self-update code. Upgrade those endpoints once with the latest connector `UPDATE_EXISTING_AGENT.bat`. After that, future updates are automatic.
 
 `UPDATE_EXISTING_AGENT.bat` remains available as a recovery/repair path if automatic update ever fails.
+
+
+## Employee portal access
+After onboarding, Employee → My PC always shows an **Agent & connector** section with the installed agent version, latest server version, auto-update state, policy sync state, and a permanent **Download latest connector** button.

@@ -988,6 +988,7 @@ def employee_bootstrap(request):
         "software_requests": SoftwareRequestSerializer(software_requests, many=True).data,
         "tickets": SupportTicketSerializer(tickets, many=True).data,
         "notifications": NotificationSerializer(notifications, many=True).data,
+        "agent_update": _agent_release_metadata(request),
     })
 
 
